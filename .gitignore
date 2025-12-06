@@ -1,0 +1,23 @@
+# --- User requests ---
+data/
+checkpoints/
+models/
+wandb/
+
+# Build / packaging
+*.egg-info/
+
+# --- Environment & Secrets ---
+.env
+.venv/
+env/
+
+# --- Python & Jupyter Cache ---
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# --- IDE & System ---
+.vscode/
+.idea/
+.DS_Store

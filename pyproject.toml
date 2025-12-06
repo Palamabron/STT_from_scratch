@@ -1,0 +1,66 @@
+[project]
+name = "speech-to-text"
+version = "0.1.0"
+description = "Conformer-CTC speech-to-text model with PyTorch Lightning and SentencePiece"
+requires-python = ">=3.11"
+
+dependencies = [
+  "torch",
+  "torchaudio",
+  "lightning",
+  "loguru",
+  "jiwer",
+  "sentencepiece",
+  "tyro",
+  "wandb",
+  "python-dotenv",
+  "datasets<=3.6.0",
+  "librosa",
+  "soundfile",
+  "torchcodec",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.6.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E203", "E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchcodec = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
