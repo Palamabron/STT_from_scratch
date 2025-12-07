@@ -1,7 +1,8 @@
 # --- User requests ---
 data/
+!data/debug/
+!data/debug/**
 checkpoints/
-models/
 wandb/
 
 # Build / packaging

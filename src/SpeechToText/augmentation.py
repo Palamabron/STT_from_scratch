@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 import torchaudio.transforms as T
@@ -73,8 +74,8 @@ class AudioAugmentation:
         new_sr = int(self.sample_rate * factor)
         resample1 = T.Resample(orig_freq=self.sample_rate, new_freq=new_sr)
         resample2 = T.Resample(orig_freq=new_sr, new_freq=self.sample_rate)
-        x = resample1(audio)
-        x = resample2(x)
+        x = cast(torch.Tensor, resample1(audio))
+        x = cast(torch.Tensor, resample2(x))
         return x
 
     def add_gaussian_noise(self, audio: torch.Tensor) -> torch.Tensor:
@@ -88,9 +89,8 @@ class AudioAugmentation:
             return audio
 
         if torch.rand(1).item() < self.cfg.prob_apply:
-            factor = self.cfg.speed_factors[
-                torch.randint(0, len(self.cfg.speed_factors), (1,)).item()
-            ]
+            idx = int(torch.randint(0, len(self.cfg.speed_factors), (1,)).item())
+            factor = self.cfg.speed_factors[idx]
             try:
                 audio = self.speed_perturb(audio, factor)
             except Exception as e:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +33,10 @@ class DataConfig:
     val_batch_size: int = 64
     max_duration: float = 15.0
     min_duration: float = 0.1
-    num_workers: int = 4
     pin_memory: bool = True
     normalize_features: bool = True
+    speed_factors: list[float] = field(default_factory=lambda: [0.9, 1.0, 1.0, 1.0, 1.1])
+    num_workers: int = 8
 
 
 class ManifestDataset(Dataset):
@@ -56,11 +57,11 @@ class ManifestDataset(Dataset):
         self.audio_augment = audio_augment
         self.current_epoch = 0
 
-        manifest_path = Path(manifest_path)
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+        mp = Path(manifest_path)
+        if not mp.exists():
+            raise FileNotFoundError(f"Manifest not found: {mp}")
 
-        with manifest_path.open("r", encoding="utf-8") as f:
+        with mp.open("r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
@@ -81,7 +82,7 @@ class ManifestDataset(Dataset):
             win_length=win_length,
             hop_length=hop_length,
             n_mels=cfg.n_mels,
-            power=2.0,  # klasyczny power spec
+            power=2.0,
             center=True,
             normalized=False,
         )
@@ -119,9 +120,10 @@ class ManifestDataset(Dataset):
         if self.audio_augment is not None and self.split == "train":
             wav = self.audio_augment(wav)
 
-        wav = wav.unsqueeze(0)  # (1, T)
-        mel = self.mel_spec(wav)  # (n_mels, T')
-        mel = self.amplitude_to_db(mel)  # (n_mels, T')
+        wav = wav.unsqueeze(0)  # (1, T')
+
+        mel = self.mel_spec(wav)  # (1, n_mels, T')
+        mel = self.amplitude_to_db(mel)  # (1, n_mels, T')
         mel = mel.transpose(1, 2).squeeze(0)  # (T', n_mels)
 
         if self.cfg.normalize_features:
@@ -136,7 +138,6 @@ class ManifestDataset(Dataset):
         if len(ids) == 0:
             logger.warning(f"Empty token sequence for text: {text!r}")
 
-        # 0 = blank, więc subwordy od 1 w górę
         ids = [i + 1 for i in ids]
         targets = torch.tensor(ids, dtype=torch.long)
         target_len = targets.size(0)
@@ -152,7 +153,6 @@ class ManifestDataset(Dataset):
 
 
 def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
-    # sortuj po długości (pomaga przy CTC, ale nie jest konieczne)
     batch = sorted(batch, key=lambda b: b["feature_length"], reverse=True)
 
     feat_lengths = torch.tensor(
@@ -161,14 +161,14 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     )
     max_feat_len = int(feat_lengths.max().item())
 
-    feats = []
+    feat_list: list[torch.Tensor] = []
     for b in batch:
         f = b["features"]  # (T, F)
         pad_f = torch.zeros(max_feat_len, f.size(1), dtype=f.dtype)
         pad_f[: f.size(0)] = f
-        feats.append(pad_f)
+        feat_list.append(pad_f)
 
-    feats = torch.stack(feats, dim=0)  # (B, T_max, F)
+    feats = torch.stack(feat_list, dim=0)  # (B, T_max, F)
 
     target_lengths = torch.tensor(
         [b["target_length"] for b in batch],
@@ -198,11 +198,10 @@ def create_dataloaders(
     spec_cfg: SpecAugmentConfig,
     audio_cfg: AudioAugmentConfig,
     augment_start_epoch: int = 3,
-):
+) -> tuple[DataLoader, DataLoader, SentencePieceProcessor]:
     sp = SentencePieceProcessor()
     sp.load(str(data_cfg.tokenizer_model))
 
-    # Na razie AUGMENTACJE WYŁĄCZONE – włączysz jak już będzie się uczyć.
     spec_aug = None
     audio_aug = None
 

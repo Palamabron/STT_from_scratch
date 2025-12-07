@@ -56,28 +56,38 @@ class FastConformerCTC(nn.Module):
         )
 
         self.proj = nn.Linear(cfg.d_model, vocab_size)
+        self.aux_proj = nn.Linear(cfg.d_model, vocab_size)
+
         self.log_softmax = nn.LogSoftmax(dim=-1)
 
     def forward(
         self,
         feats: torch.Tensor,
         feat_lengths: torch.Tensor,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         feats: (B, T, F)
         feat_lengths: (B,)
+        Returns:
+            log_probs: (B, T', V)
+            out_lengths: (B,)
+            aux_log_probs: (B, T', V)
         """
-        x = feats.transpose(1, 2)  # (B, F, T)
+        x = feats.transpose(1, 2)
         x = self.conv_downsample(x)
-        x = x.transpose(1, 2)  # (B, T', C)
+        x = x.transpose(1, 2)
 
         stride = self.cfg.stride
         out_lengths = (feat_lengths + stride - 1) // stride
 
-        x = self.input_proj(x)  # (B, T', d_model)
-        enc_out, _ = self.encoder(x, out_lengths)  # (B, T', d_model)
+        x = self.input_proj(x)
 
-        logits = self.proj(enc_out)  # (B, T', vocab)
+        aux_logits = self.aux_proj(x)
+        aux_log_probs = self.log_softmax(aux_logits)
+
+        enc_out, _ = self.encoder(x, out_lengths)
+
+        logits = self.proj(enc_out)
         log_probs = self.log_softmax(logits)
 
-        return log_probs, out_lengths
+        return log_probs, out_lengths, aux_log_probs
