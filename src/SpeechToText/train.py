@@ -516,7 +516,7 @@ def main(cfg: TrainConfig) -> None:
         mode="min",
         save_top_k=3,
         verbose=True,
-        filename="{epoch:03d}-{val_wer_overall:.2f}",
+        filename="{epoch:03d}-{val/wer/overall:.2f}",
         save_last=True,
         every_n_epochs=1,
     )
