@@ -1,111 +1,98 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import cast
-
 import torch
 import torchaudio
 import tyro
-from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from .train import LitFastConformerCTC, greedy_decoder
+from SpeechToText.models.ctc_attention.train import DataConfig, LitFastConformerCTCAttention
+from SpeechToText.utils.audio import build_feature_transforms, extract_features
+from SpeechToText.utils.decoding import greedy_decode_single
 
 
-@dataclass
 class TranscribeConfig:
     checkpoint: str
-    audio: str
-    tokenizer_model: str = "models/sp_en_pl_unigram_2k_lower.model"
-    device: str = "auto"
+    tokenizer_model: str
     sample_rate: int = 16_000
+    device: str = "auto"
 
 
-def load_audio(path: str, target_sr: int, device: torch.device) -> torch.Tensor:
-    waveform, sr = torchaudio.load(path)
-    if waveform.dim() == 2 and waveform.size(0) > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    if sr != target_sr:
-        resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
-        waveform = cast(torch.Tensor, resampler(waveform))
-    waveform = waveform.to(device)
-    waveform = waveform.squeeze(0)
-    return cast(torch.Tensor, waveform)
-
-
-def decode_text(
-    log_probs: torch.Tensor,
-    tokenizer: SentencePieceProcessor,
-    blank_token_id: int,
-) -> str:
-    batch_size, T, _ = log_probs.shape
-    out_lengths = torch.full(
-        (batch_size,),
-        T,
-        dtype=torch.long,
-        device=log_probs.device,
-    )
-
-    decoded_ids_batch = greedy_decoder(
-        log_probs,
-        out_lengths,
-        blank_id=blank_token_id,
-    )
-    seq = decoded_ids_batch[0]
-
-    sp_ids = [i - 1 for i in seq if i > 0]
-    if not sp_ids:
-        return ""
-    text = tokenizer.decode_ids(sp_ids)
-    return cast(str, text)
-
-
-def load_tokenizer(tokenizer_model_path: str) -> SentencePieceProcessor:
-    sp = SentencePieceProcessor()
-    sp.load(tokenizer_model_path)
-    return sp
-
-
-def main(cfg: TranscribeConfig) -> None:
-    if cfg.device == "auto":
+def get_device(device_str: str) -> torch.device:
+    if device_str == "auto":
         if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-    else:
-        device = torch.device(cfg.device)
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(device_str)
 
-    logger.info(f"Using device: {device}")
 
-    tokenizer = load_tokenizer(cfg.tokenizer_model)
+def load_model_and_frontend(
+    cfg: TranscribeConfig,
+) -> tuple[
+    LitFastConformerCTCAttention,
+    SentencePieceProcessor,
+    DataConfig,
+    torchaudio.transforms.MelSpectrogram,
+    torchaudio.transforms.AmplitudeToDB,
+]:
+    device = get_device(cfg.device)
+    sp = SentencePieceProcessor()
+    sp.load(cfg.tokenizer_model)
 
-    logger.info(f"Loading checkpoint from {cfg.checkpoint}")
-    model = LitFastConformerCTC.load_from_checkpoint(
+    model = LitFastConformerCTCAttention.load_from_checkpoint(
         cfg.checkpoint,
-        sp=tokenizer,
+        sp=sp,
+        weights_only=False,
     )
     model.eval()
     model.to(device)
 
+    data_cfg = DataConfig(
+        train_manifest="",
+        val_manifest="",
+        tokenizer_model=cfg.tokenizer_model,
+        sample_rate=cfg.sample_rate,
+    )
+    mel_spec, amplitude_to_db = build_feature_transforms(data_cfg)
+    mel_spec.to(device)
+    amplitude_to_db.to(device)
+
+    return model, sp, data_cfg, mel_spec, amplitude_to_db
+
+
+@torch.inference_mode()
+def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]:
+    device = get_device(cfg.device)
+    model, sp, data_cfg, mel_spec, amplitude_to_db = load_model_and_frontend(cfg)
     blank_id = 0
 
-    audio_path = Path(cfg.audio)
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-    waveform = load_audio(str(audio_path), target_sr=cfg.sample_rate, device=device)
-    with torch.no_grad():
-        batch = waveform.unsqueeze(0)
-        log_probs, out_lengths, _ = model(
-            batch,
-            torch.tensor([batch.size(1)], device=device),
+    transcripts: list[str] = []
+    for path in audio_paths:
+        mel, feat_len = extract_features(
+            audio_path=path,
+            data_cfg=data_cfg,
+            mel_spec=mel_spec,
+            amplitude_to_db=amplitude_to_db,
+            device=device,
         )
+        feats = mel.unsqueeze(0)
+        feat_lengths = torch.tensor([feat_len], device=device, dtype=torch.long)
 
-    transcription = decode_text(log_probs, tokenizer, blank_token_id=blank_id)
-    print(transcription)
+        outputs = model(feats, feat_lengths)
+        log_probs = outputs[0][0]
+        out_len = int(outputs[1][0].item())
+
+        text = greedy_decode_single(log_probs, out_len, sp, blank_id=blank_id)
+        transcripts.append(text)
+
+    return transcripts
+
+
+def main(audio_paths: list[str], cfg: TranscribeConfig) -> None:
+    texts = transcribe_files(cfg, audio_paths)
+    for path, text in zip(audio_paths, texts, strict=False):
+        print(f"{path}: {text}")
 
 
 if __name__ == "__main__":

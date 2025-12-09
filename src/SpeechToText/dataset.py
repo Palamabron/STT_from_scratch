@@ -202,8 +202,10 @@ def create_dataloaders(
     sp = SentencePieceProcessor()
     sp.load(str(data_cfg.tokenizer_model))
 
-    spec_aug = None
-    audio_aug = None
+    spec_aug = SpecAugment(spec_cfg, augment_start_epoch=augment_start_epoch)
+    audio_aug = AudioAugmentation(
+        audio_cfg, sample_rate=data_cfg.sample_rate, augment_start_epoch=augment_start_epoch
+    )
 
     train_ds = ManifestDataset(
         manifest_path=data_cfg.train_manifest,

@@ -1,17 +1,20 @@
 UV_DEV := uv run --extra dev
 UV := uv run
 
+REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+
 .PHONY: fmt download_dataset test typecheck
 
 fmt:
-	$(UV_DEV) ruff format src scripts
-	$(UV_DEV) ruff check src scripts --fix
+	cd $(REPO_ROOT) && $(UV_DEV) ruff format src scripts
+	cd $(REPO_ROOT) && $(UV_DEV) ruff check src scripts --fix
 
 download_dataset:
-	$(UV) scripts/prepare_multilingual_asr.py
-	$(UV) scripts/prepare_librispeech_clean_100.py
+	cd $(REPO_ROOT) && $(UV) scripts/prepare_multilingual_asr.py
+	cd $(REPO_ROOT) && $(UV) scripts/prepare_librispeech_clean_100.py
 
 test:
+	cd $(REPO_ROOT) && \
 	$(UV) python -m src.SpeechToText.train \
 		--data.train_manifest data/debug/en_one.jsonl \
 		--data.val_manifest data/debug/en_one.jsonl \
@@ -28,4 +31,4 @@ test:
 		--wandb_run_name debug-overfit-one
 
 typecheck:
-	$(UV_DEV) mypy src
+	cd $(REPO_ROOT) && $(UV_DEV) mypy src
