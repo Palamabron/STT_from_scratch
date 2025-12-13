@@ -9,8 +9,8 @@ from loguru import logger
 
 @dataclass
 class SpecAugmentConfig:
-    freq_masks: int = 3
-    time_masks: int = 15
+    freq_masks: int = 2
+    time_masks: int = 10
     freq_width: int = 30
     time_width_fraction: float = 0.1
 

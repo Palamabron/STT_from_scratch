@@ -18,6 +18,11 @@ dependencies = [
   "librosa",
   "soundfile",
   "torchcodec",
+  "pyctcdecode>=0.5.0",
+  "kenlm>=0.3.0",
+  "pandas>=2.3.3",
+  "tqdm>=4.67.1",
+  "editdistance>=0.8.1",
 ]
 
 [project.optional-dependencies]
