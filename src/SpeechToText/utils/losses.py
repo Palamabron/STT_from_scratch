@@ -43,7 +43,7 @@ def ctc_loss_with_label_smoothing(
         if log_probs_valid.numel() == 0:
             return ctc
 
-        if exclude_blank_from_ls and 0 <= blank_id < V and V > 1:
+        if exclude_blank_from_ls and 0 <= blank_id < V:
             vocab_mask = torch.ones(V, device=log_probs_t.device, dtype=torch.bool)
             vocab_mask[blank_id] = False
             log_probs_valid = log_probs_valid[:, vocab_mask]
