@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeAlias, cast
 
-import editdistance  # type: ignore[import-not-found]
+import editdistance
+import numpy as np
 import torch
 from sentencepiece import SentencePieceProcessor
 
 from SpeechToText.models.ctc.train import greedy_decoder
+
+MetricKey: TypeAlias = tuple[str, int | None, float | None, float | None, str]
+MetricState: TypeAlias = dict[str, float]
 
 
 def edit_distance(tokens_ref: Sequence[str], tokens_hyp: Sequence[str]) -> int:
@@ -42,14 +46,16 @@ def greedy_decode_single(
     blank_id: int,
 ) -> str:
     """Greedy CTC decoding for a single sequence."""
-    truncated = log_probs[:out_len].unsqueeze(0)
+    truncated = log_probs[:out_len].unsqueeze(0)  # (1, T, V)
     out_lengths = torch.tensor([out_len], device=truncated.device, dtype=torch.long)
+
     decoded_ids_batch = greedy_decoder(truncated, out_lengths, blank_id=blank_id)
     token_ids = decoded_ids_batch[0]
+
     sp_ids = [idx - 1 for idx in token_ids if idx > 0]
     if not sp_ids:
         return ""
-    return tokenizer.decode_ids(sp_ids)
+    return cast(str, tokenizer.decode_ids(sp_ids))
 
 
 def decode_batch_with_greedy(
@@ -59,10 +65,11 @@ def decode_batch_with_greedy(
     batch_langs: Sequence[str],
     tokenizer: SentencePieceProcessor,
     blank_id: int,
-    metrics: dict[tuple[str, int | None, float | None, float | None, str], dict[str, float]],
+    metrics: dict[MetricKey, MetricState],
 ) -> None:
     """Run greedy decoding for a batch and update metrics."""
     batch_size = batch_log_probs.size(0)
+
     for idx in range(batch_size):
         log_probs = batch_log_probs[idx]
         out_len = int(batch_lengths[idx].item())
@@ -70,17 +77,20 @@ def decode_batch_with_greedy(
         lang = batch_langs[idx]
 
         hyp = greedy_decode_single(log_probs, out_len, tokenizer, blank_id=blank_id)
-        wer_num, wer_den, cer_num, cer_den = compute_wer_cer(ref, hyp)
+        wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
+
+        if werden == 0 and cerden == 0:
+            continue
+
         for lang_key in ("all", lang):
             key = ("greedy", None, None, None, lang_key)
             state = metrics.setdefault(
-                key,
-                {"wer_num": 0.0, "wer_den": 0.0, "cer_num": 0.0, "cer_den": 0.0, "count": 0.0},
+                key, {"wer_num": 0.0, "wer_den": 0.0, "cer_num": 0.0, "cer_den": 0.0, "count": 0.0}
             )
-            state["wer_num"] += wer_num
-            state["wer_den"] += wer_den
-            state["cer_num"] += cer_num
-            state["cer_den"] += cer_den
+            state["wer_num"] += float(wernum)
+            state["wer_den"] += float(werden)
+            state["cer_num"] += float(cernum)
+            state["cer_den"] += float(cerden)
             state["count"] += 1.0
 
 
@@ -91,26 +101,19 @@ def collect_probs_for_beam(
     batch_langs: Sequence[str],
     vocab_size_with_blank: int,
 ) -> tuple[list[Any], list[str], list[str]]:
-    """Convert log-probs to probs and collect metadata for beam decoding."""
+    """Prepare per-example probability matrices for pyctcdecode."""
     probs_list: list[Any] = []
     refs_list: list[str] = []
     langs_list: list[str] = []
 
     batch_size = batch_log_probs.size(0)
-    for idx in range(batch_size):
-        log_probs = batch_log_probs[idx]
-        out_len = int(batch_lengths[idx].item())
-
-        logits_dim = log_probs.shape[-1]
-        if logits_dim != vocab_size_with_blank:
-            raise ValueError(f"logits_dim={logits_dim}, expected={vocab_size_with_blank}")
-
-        truncated = log_probs[:out_len]
-        probs_np = truncated.exp().cpu().numpy()
-
-        probs_list.append(probs_np)
-        refs_list.append(batch_refs[idx])
-        langs_list.append(batch_langs[idx])
+    for i in range(batch_size):
+        out_len = int(batch_lengths[i].item())
+        logp = batch_log_probs[i, :out_len, :vocab_size_with_blank]  # (T, V)
+        probs = torch.exp(logp).detach().cpu().to(torch.float32).numpy()
+        probs_list.append(cast(np.ndarray, probs))
+        refs_list.append(str(batch_refs[i]))
+        langs_list.append(str(batch_langs[i]))
 
     return probs_list, refs_list, langs_list
 
@@ -129,18 +132,25 @@ def decode_batch_with_beam(
     metrics: dict[tuple[str, int | None, float | None, float | None, str], dict[str, float]],
 ) -> None:
     """Run beam and beam+KenLM decoding and update metrics."""
-    if pool is None or not probs_per_example:
+    if not probs_per_example:
         return
+
+    def _decode_batch(decoder: Any, probs: list[Any], beam_width: int) -> list[str]:
+        if pool is not None:
+            return cast(list[str], decoder.decode_batch(pool, probs, beam_width=beam_width))
+        return [cast(str, decoder.decode(p, beam_width=beam_width)) for p in probs]
 
     if "beam" in decode_types and decoder_ctc is not None:
         for beam_width in beam_widths:
-            hyps = decoder_ctc.decode_batch(pool, probs_per_example, beam_width=beam_width)
+            hyps = _decode_batch(decoder_ctc, probs_per_example, beam_width)
+
             for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
-                wer_num, wer_den, cer_num, cer_den = compute_wer_cer(ref, hyp)
-                if wer_den == 0 and cer_den == 0:
+                wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
+                if werden == 0 and cerden == 0:
                     continue
+
                 for lang_key in ("all", lang):
-                    key = ("beam", beam_width, None, None, lang_key)
+                    key: MetricKey = ("beam", beam_width, None, None, lang_key)
                     state = metrics.setdefault(
                         key,
                         {
@@ -151,22 +161,27 @@ def decode_batch_with_beam(
                             "count": 0.0,
                         },
                     )
-                    state["wer_num"] += wer_num
-                    state["wer_den"] += wer_den
-                    state["cer_num"] += cer_num
-                    state["cer_den"] += cer_den
+                    state["wer_num"] += float(wernum)
+                    state["wer_den"] += float(werden)
+                    state["cer_num"] += float(cernum)
+                    state["cer_den"] += float(cerden)
                     state["count"] += 1.0
 
     if "beam_kenlm" in decode_types and decoders_kenlm:
         for alpha in alphas:
             for beta in betas:
-                decoder = decoders_kenlm[(alpha, beta)]
+                decoder = decoders_kenlm.get((alpha, beta))
+                if decoder is None:
+                    continue
+
                 for beam_width in beam_widths:
-                    hyps = decoder.decode_batch(pool, probs_per_example, beam_width=beam_width)
+                    hyps = _decode_batch(decoder, probs_per_example, beam_width)
+
                     for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
-                        wer_num, wer_den, cer_num, cer_den = compute_wer_cer(ref, hyp)
-                        if wer_den == 0 and cer_den == 0:
+                        wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
+                        if werden == 0 and cerden == 0:
                             continue
+
                         for lang_key in ("all", lang):
                             key = ("beam_kenlm", beam_width, alpha, beta, lang_key)
                             state = metrics.setdefault(
@@ -179,8 +194,8 @@ def decode_batch_with_beam(
                                     "count": 0.0,
                                 },
                             )
-                            state["wer_num"] += wer_num
-                            state["wer_den"] += wer_den
-                            state["cer_num"] += cer_num
-                            state["cer_den"] += cer_den
+                            state["wer_num"] += float(wernum)
+                            state["wer_den"] += float(werden)
+                            state["cer_num"] += float(cernum)
+                            state["cer_den"] += float(cerden)
                             state["count"] += 1.0

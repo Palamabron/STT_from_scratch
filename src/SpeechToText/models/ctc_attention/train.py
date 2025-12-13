@@ -3,12 +3,11 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass, field
-from typing import Any, Literal, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 import lightning.pytorch as pl
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import tyro
 from dotenv import load_dotenv
 from jiwer import cer as jiwer_cer
@@ -18,6 +17,8 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
+
+from SpeechToText.utils.losses import ctc_loss_with_label_smoothing
 
 from ...augmentation import AudioAugmentConfig, SpecAugmentConfig
 from ...dataset import DataConfig, create_dataloaders
@@ -42,6 +43,22 @@ PrecisionType = Literal[
     "transformer-engine",
     "transformer-engine-float16",
 ]
+
+
+class TrainBatch(TypedDict):
+    features: torch.Tensor
+    feature_lengths: torch.Tensor
+    targets: torch.Tensor
+    target_lengths: torch.Tensor
+
+
+class ValBatch(TypedDict):
+    features: torch.Tensor
+    feature_lengths: torch.Tensor
+    targets: torch.Tensor
+    target_lengths: torch.Tensor
+    text: list[str]
+    language: NotRequired[list[str]]
 
 
 @dataclass
@@ -90,10 +107,10 @@ def greedy_decoder(
     blank_id: int,
 ) -> list[list[int]]:
     preds = torch.argmax(log_probs, dim=-1).cpu()
-    out_lengths = out_lengths.cpu()
+    out_lengths_cpu = out_lengths.cpu()
 
     decoded: list[list[int]] = []
-    for seq, L in zip(preds, out_lengths, strict=True):
+    for seq, L in zip(preds, out_lengths_cpu, strict=True):
         T = int(L.item())
         prev = -1
         tokens: list[int] = []
@@ -144,63 +161,14 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         )
         self.attn_loss = nn.NLLLoss(ignore_index=self.pad_id, reduction="mean")
 
-        self.example_buffer: dict[str, list[tuple[str, str]]] = {
-            "en": [],
-            "pl": [],
-        }
+        self.example_buffer: dict[str, list[tuple[str, str]]] = {"en": [], "pl": []}
         self.examples_per_lang: int = 2
-
-    def ctc_loss_with_label_smoothing(
-        self,
-        log_probs_t: torch.Tensor,
-        targets: torch.Tensor,
-        input_lengths: torch.Tensor,
-        target_lengths: torch.Tensor,
-        epsilon: float,
-    ) -> torch.Tensor:
-        log_probs_t = log_probs_t.float()
-        input_lengths = input_lengths.to(dtype=torch.long)
-        target_lengths = target_lengths.to(dtype=torch.long)
-
-        with torch.autocast(device_type="cuda", enabled=False):
-            base_loss = F.ctc_loss(
-                log_probs_t,
-                targets,
-                input_lengths,
-                target_lengths,
-                reduction="mean",
-                blank=self.blank_id,
-                zero_infinity=True,
-            )
-
-            if epsilon <= 0.0:
-                return base_loss
-
-            T, B, V = log_probs_t.shape
-            non_blank = V - 1
-            if non_blank <= 0:
-                return base_loss
-
-            uniform_neglog = torch.log(
-                torch.tensor(
-                    float(non_blank),
-                    device=log_probs_t.device,
-                    dtype=log_probs_t.dtype,
-                )
-            )
-
-            smoothing_loss = uniform_neglog
-            return (1.0 - epsilon) * base_loss + epsilon * smoothing_loss
 
     def build_decoder_sequences(
         self,
         targets: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Build BOS-in and EOS-out sequences for attention decoder from
-        1D CTC targets (concatenated) and per-utterance lengths.
-        """
         device = targets.device
         B = int(target_lengths.shape[0])
         max_len = int(target_lengths.max().item())
@@ -268,7 +236,6 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         def lr_lambda(epoch: int) -> float:
             if epoch < warmup_epochs:
                 return float(epoch + 1) / float(warmup_epochs)
-
             progress = (epoch - warmup_epochs) / max(1.0, float(max_epochs - warmup_epochs))
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return eta_min_factor + (1.0 - eta_min_factor) * cosine
@@ -277,11 +244,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1},
         }
 
     def on_train_epoch_start(self) -> None:
@@ -294,7 +257,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         if ds is not None and hasattr(ds, "set_current_epoch"):
             ds.set_current_epoch(epoch)
 
-    def training_step(self, batch: dict[str, Any], batch_idx: int) -> torch.Tensor:
+    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor:
         feats = batch["features"]
         feat_lengths = batch["feature_lengths"]
         targets = batch["targets"]
@@ -302,10 +265,11 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
         dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
 
-        ctc_log_probs, out_lengths, aux_log_probs, dec_log_probs = self(
-            feats, feat_lengths, decoder_input=dec_in
+        ctc_log_probs, out_lengths, aux_log_probs, dec_log_probs = self.forward(
+            feats,
+            feat_lengths,
+            decoder_input=dec_in,
         )
-
         ctc_log_probs_t = ctc_log_probs.transpose(0, 1)
 
         if (out_lengths < target_lengths).any():
@@ -314,12 +278,17 @@ class LitFastConformerCTCAttention(pl.LightningModule):
                 f"CTC input length smaller than target length. Min(input_len - target_len) = {diff}"
             )
 
-        main_ctc = self.ctc_loss_with_label_smoothing(
-            ctc_log_probs_t,
-            targets,
-            out_lengths,
-            target_lengths,
-            epsilon=self.cfg.ctc_label_smoothing,
+        autocast_device_type = "cuda" if ctc_log_probs_t.is_cuda else "cpu"
+
+        main_ctc = ctc_loss_with_label_smoothing(
+            log_probs_t=ctc_log_probs_t,
+            targets=targets,
+            input_lengths=out_lengths,
+            target_lengths=target_lengths,
+            blank_id=self.blank_id,
+            lsm_weight=self.cfg.ctc_label_smoothing,
+            autocast_device_type=autocast_device_type,
+            exclude_blank_from_ls=True,
         )
 
         if self.cfg.aux_ctc_weight > 0.0 and aux_log_probs.numel() > 0:
@@ -327,30 +296,35 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             for i in range(aux_log_probs.size(0)):
                 aux_i = aux_log_probs[i].transpose(0, 1)
                 aux_losses.append(
-                    self.ctc_loss_with_label_smoothing(
-                        aux_i,
-                        targets,
-                        out_lengths,
-                        target_lengths,
-                        epsilon=self.cfg.ctc_label_smoothing,
+                    ctc_loss_with_label_smoothing(
+                        log_probs_t=aux_i,
+                        targets=targets,
+                        input_lengths=out_lengths,
+                        target_lengths=target_lengths,
+                        blank_id=self.blank_id,
+                        lsm_weight=self.cfg.ctc_label_smoothing,
+                        autocast_device_type=autocast_device_type,
+                        exclude_blank_from_ls=True,
                     )
                 )
-            aux_ctc = torch.stack(aux_losses).mean()
+            aux_ctc: torch.Tensor = torch.stack(aux_losses).mean()
         else:
             aux_ctc = torch.tensor(0.0, device=main_ctc.device)
 
-        assert dec_log_probs is not None
+        if dec_log_probs is None:
+            raise RuntimeError("Expected decoder outputs during training, got None.")
+
         B, L, V_dec = dec_log_probs.shape
-        attn_loss = self.attn_loss(
+        attn_loss: torch.Tensor = self.attn_loss(
             dec_log_probs.reshape(B * L, V_dec),
             dec_out.reshape(B * L),
         )
 
-        lambda_ctc = self.cfg.ctc_weight
-        total_loss = (
+        lambda_ctc = float(self.cfg.ctc_weight)
+        total_loss: torch.Tensor = (
             lambda_ctc * main_ctc
             + (1.0 - lambda_ctc) * attn_loss
-            + self.cfg.aux_ctc_weight * aux_ctc
+            + float(self.cfg.aux_ctc_weight) * aux_ctc
         )
 
         self.log(
@@ -399,15 +373,15 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
         return total_loss
 
-    def validation_step(self, batch: dict[str, Any], batch_idx: int) -> dict[str, float]:
+    def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
         feats = batch["features"]
         feat_lengths = batch["feature_lengths"]
         targets = batch["targets"]
         target_lengths = batch["target_lengths"]
         texts = batch["text"]
-        langs = batch.get("language", ["unknown"] * len(texts))
+        langs = batch.get("language") or ["unknown"] * len(texts)
 
-        ctc_log_probs, out_lengths, _, _ = self(feats, feat_lengths, decoder_input=None)
+        ctc_log_probs, out_lengths, _, _ = self.forward(feats, feat_lengths, decoder_input=None)
         ctc_log_probs_t = ctc_log_probs.transpose(0, 1)
 
         if (out_lengths < target_lengths).any():
@@ -417,34 +391,20 @@ class LitFastConformerCTCAttention(pl.LightningModule):
                 f"Min(input_len - target_len) = {diff}"
             )
 
-        loss = self.ctc_loss(ctc_log_probs_t, targets, out_lengths, target_lengths)
+        loss: torch.Tensor = self.ctc_loss(ctc_log_probs_t, targets, out_lengths, target_lengths)
 
-        decoded_ids = greedy_decoder(
-            ctc_log_probs,
-            out_lengths,
-            blank_id=self.blank_id,
-        )
+        decoded_ids = greedy_decoder(ctc_log_probs, out_lengths, blank_id=self.blank_id)
 
         pred_texts: list[str] = []
         for seq in decoded_ids:
             sp_ids = [i - 1 for i in seq if i > 0]
-            if len(sp_ids) == 0:
-                pred_texts.append("")
-            else:
-                pred_texts.append(self.sp.decode_ids(sp_ids))
+            pred_texts.append("" if not sp_ids else self.sp.decode_ids(sp_ids))
 
-        batch_wer = jiwer_wer(texts, pred_texts)
-        batch_cer = jiwer_cer(texts, pred_texts)
+        batch_wer: float = float(jiwer_wer(texts, pred_texts))
+        batch_cer: float = float(jiwer_cer(texts, pred_texts))
         bs = len(texts)
 
-        self.log(
-            "val/loss",
-            loss,
-            prog_bar=True,
-            on_epoch=True,
-            sync_dist=False,
-            batch_size=bs,
-        )
+        self.log("val/loss", loss, prog_bar=True, on_epoch=True, sync_dist=False, batch_size=bs)
         self.log(
             "val/wer/overall",
             batch_wer,
@@ -462,8 +422,10 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             batch_size=bs,
         )
 
-        en_refs, en_hyps = [], []
-        pl_refs, pl_hyps = [], []
+        en_refs: list[str] = []
+        en_hyps: list[str] = []
+        pl_refs: list[str] = []
+        pl_hyps: list[str] = []
 
         for lang, ref, hyp in zip(langs, texts, pred_texts, strict=True):
             if lang == "en":
@@ -474,45 +436,23 @@ class LitFastConformerCTCAttention(pl.LightningModule):
                 pl_hyps.append(hyp)
 
         if en_refs:
-            en_wer = jiwer_wer(en_refs, en_hyps)
-            en_cer = jiwer_cer(en_refs, en_hyps)
-            self.log(
-                "val/wer/en",
-                en_wer,
-                prog_bar=False,
-                on_epoch=True,
-                batch_size=len(en_refs),
-            )
-            self.log(
-                "val/cer/en",
-                en_cer,
-                prog_bar=False,
-                on_epoch=True,
-                batch_size=len(en_refs),
-            )
+            en_wer: float = float(jiwer_wer(en_refs, en_hyps))
+            en_cer: float = float(jiwer_cer(en_refs, en_hyps))
+            self.log("val/wer/en", en_wer, prog_bar=False, on_epoch=True, batch_size=len(en_refs))
+            self.log("val/cer/en", en_cer, prog_bar=False, on_epoch=True, batch_size=len(en_refs))
 
         if pl_refs:
-            pl_wer = jiwer_wer(pl_refs, pl_hyps)
-            pl_cer = jiwer_cer(pl_refs, pl_hyps)
-            self.log(
-                "val/wer/pl",
-                pl_wer,
-                prog_bar=False,
-                on_epoch=True,
-                batch_size=len(pl_refs),
-            )
-            self.log(
-                "val/cer/pl",
-                pl_cer,
-                prog_bar=False,
-                on_epoch=True,
-                batch_size=len(pl_refs),
-            )
+            pl_wer: float = float(jiwer_wer(pl_refs, pl_hyps))
+            pl_cer: float = float(jiwer_cer(pl_refs, pl_hyps))
+            self.log("val/wer/pl", pl_wer, prog_bar=False, on_epoch=True, batch_size=len(pl_refs))
+            self.log("val/cer/pl", pl_cer, prog_bar=False, on_epoch=True, batch_size=len(pl_refs))
 
         for lang, ref, hyp in zip(langs, texts, pred_texts, strict=True):
-            if lang in self.example_buffer:
-                if len(self.example_buffer[lang]) < self.examples_per_lang:
-                    self.example_buffer[lang].append((ref, hyp))
+            if (
+                lang in self.example_buffer
+                and len(self.example_buffer[lang]) < self.examples_per_lang
+            ):
+                self.example_buffer[lang].append((ref, hyp))
 
         return {"wer": batch_wer, "cer": batch_cer}
 

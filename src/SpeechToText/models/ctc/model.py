@@ -105,12 +105,14 @@ class FastConformerCTC(nn.Module):
         x_t = x.transpose(0, 1)
 
         aux_logits_list: list[torch.Tensor] = []
+        layer_to_head = {layer_i: head_i for head_i, layer_i in enumerate(self.aux_layer_indices)}
+
         for layer_idx, layer in enumerate(self.encoder.conformer_layers):
             x_t = layer(x_t, encoder_padding_mask)
-            if layer_idx in self.aux_layer_indices:
-                h = x_t.transpose(0, 1)
-                head_idx = self.aux_layer_indices.index(layer_idx)
-                aux_logits_list.append(self.aux_projs[head_idx](h))
+            head_idx = layer_to_head.get(layer_idx)
+            if head_idx is not None:
+                h = x_t.transpose(0, 1)  # (B, T', D)
+                aux_logits_list.append(self.aux_projs[head_idx](h))  # (B, T', V)
 
         enc_out = x_t.transpose(0, 1)
 
@@ -118,7 +120,7 @@ class FastConformerCTC(nn.Module):
         log_probs = self.log_softmax(logits)
 
         if aux_logits_list:
-            aux_logits = torch.stack(aux_logits_list, dim=0)
+            aux_logits = torch.stack(aux_logits_list, dim=0)  # (N_aux, B, T', V)
             aux_log_probs = self.log_softmax(aux_logits)
         else:
             V = logits.size(-1)

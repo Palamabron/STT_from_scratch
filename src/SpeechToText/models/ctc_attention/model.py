@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchaudio.models import Conformer
 
 from ..ctc.model import FastConformerCTCConfig
@@ -99,8 +100,6 @@ class FastConformerCTCAttention(nn.Module):
 
         self.decoder_proj = nn.Linear(d_model, self.decoder_vocab_size)
 
-        self.log_softmax = nn.LogSoftmax(dim=-1)
-
     @staticmethod
     def _lengths_to_padding_mask(lengths: torch.Tensor) -> torch.Tensor:
         batch_size = lengths.shape[0]
@@ -131,21 +130,23 @@ class FastConformerCTCAttention(nn.Module):
         x_t = x.transpose(0, 1)
 
         aux_logits_list: list[torch.Tensor] = []
+        layer_to_head = {layer_i: head_i for head_i, layer_i in enumerate(self.aux_layer_indices)}
+
         for layer_idx, layer in enumerate(self.encoder.conformer_layers):
             x_t = layer(x_t, encoder_padding_mask)
-            if layer_idx in self.aux_layer_indices:
-                h = x_t.transpose(0, 1)
-                head_idx = self.aux_layer_indices.index(layer_idx)
-                aux_logits_list.append(self.aux_projs[head_idx](h))
+            head_idx = layer_to_head.get(layer_idx)
+            if head_idx is not None:
+                h = x_t.transpose(0, 1)  # (B, T', D)
+                aux_logits_list.append(self.aux_projs[head_idx](h))  # (B, T', V_ctc)
 
         enc_out = x_t.transpose(0, 1)
 
         ctc_logits = self.ctc_proj(enc_out)
-        ctc_log_probs = self.log_softmax(ctc_logits)
+        ctc_log_probs = F.log_softmax(ctc_logits, dim=-1)
 
         if aux_logits_list:
-            aux_logits = torch.stack(aux_logits_list, dim=0)
-            aux_log_probs = self.log_softmax(aux_logits)
+            aux_logits = torch.stack(aux_logits_list, dim=0)  # (N_aux, B, T', V_ctc)
+            aux_log_probs = F.log_softmax(aux_logits, dim=-1)
         else:
             V = ctc_logits.size(-1)
             aux_log_probs = torch.empty(
@@ -185,7 +186,7 @@ class FastConformerCTCAttention(nn.Module):
             memory_key_padding_mask=enc_pad_mask,
         )
         logits = self.decoder_proj(decoded)
-        log_probs = self.log_softmax(logits)
+        log_probs = F.log_softmax(logits, dim=-1)
         return log_probs
 
     def forward(

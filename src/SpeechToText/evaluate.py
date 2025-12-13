@@ -5,7 +5,7 @@ import multiprocessing as mp
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import torch
@@ -34,11 +34,13 @@ from SpeechToText.utils.decoding import (
     decode_batch_with_greedy,
 )
 
-sys.modules["__main__"].TrainConfig = CtcAttnTrainConfig
-sys.modules["__main__"].OptimizerConfig = OptimizerConfig
-sys.modules["__main__"].DataConfig = DataConfig
-sys.modules["__main__"].SpecAugmentConfig = SpecAugmentConfig
-sys.modules["__main__"].AudioAugmentConfig = AudioAugmentConfig
+if not TYPE_CHECKING:
+    main_mod = cast(Any, sys.modules["__main__"])
+    main_mod.TrainConfig = CtcAttnTrainConfig
+    main_mod.OptimizerConfig = OptimizerConfig
+    main_mod.DataConfig = DataConfig
+    main_mod.SpecAugmentConfig = SpecAugmentConfig
+    main_mod.AudioAugmentConfig = AudioAugmentConfig
 
 
 @dataclass

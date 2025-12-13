@@ -8,7 +8,6 @@ from typing import Any, Literal, cast
 import lightning.pytorch as pl
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import tyro
 from dotenv import load_dotenv
 from jiwer import cer as jiwer_cer
@@ -18,6 +17,8 @@ from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
+
+from SpeechToText.utils.losses import ctc_loss_with_label_smoothing
 
 from ...augmentation import AudioAugmentConfig, SpecAugmentConfig
 from ...dataset import DataConfig, create_dataloaders
@@ -79,6 +80,7 @@ class TrainConfig:
     scheduler_restart_interval: int = 50
 
     ckpt_path: str | None = None
+    seed: int = 42
 
 
 def greedy_decoder(
@@ -87,10 +89,10 @@ def greedy_decoder(
     blank_id: int,
 ) -> list[list[int]]:
     preds = torch.argmax(log_probs, dim=-1).cpu()
-    out_lengths = out_lengths.cpu()
+    out_lengths_cpu = out_lengths.cpu()
 
     decoded: list[list[int]] = []
-    for seq, L in zip(preds, out_lengths, strict=True):
+    for seq, L in zip(preds, out_lengths_cpu, strict=True):
         T = int(L.item())
         prev = -1
         tokens: list[int] = []
@@ -125,59 +127,15 @@ class LitFastConformerCTC(pl.LightningModule):
             vocab_size=vocab_size,
             blank_id=blank_id,
         )
+
         self.ctc_loss = nn.CTCLoss(
             blank=blank_id,
             zero_infinity=True,
             reduction="mean",
         )
 
-        self.example_buffer: dict[str, list[tuple[str, str]]] = {
-            "en": [],
-            "pl": [],
-        }
+        self.example_buffer: dict[str, list[tuple[str, str]]] = {"en": [], "pl": []}
         self.examples_per_lang: int = 2
-
-    def ctc_loss_with_label_smoothing(
-        self,
-        log_probs_t: torch.Tensor,
-        targets: torch.Tensor,
-        input_lengths: torch.Tensor,
-        target_lengths: torch.Tensor,
-        epsilon: float,
-    ) -> torch.Tensor:
-        log_probs_t = log_probs_t.float()
-        input_lengths = input_lengths.to(dtype=torch.long)
-        target_lengths = target_lengths.to(dtype=torch.long)
-
-        with torch.autocast(device_type="cuda", enabled=False):
-            base_loss = F.ctc_loss(
-                log_probs_t,
-                targets,
-                input_lengths,
-                target_lengths,
-                reduction="mean",
-                blank=self.blank_id,
-                zero_infinity=True,
-            )
-
-            if epsilon <= 0.0:
-                return base_loss
-
-            T, B, V = log_probs_t.shape
-            non_blank = V - 1
-            if non_blank <= 0:
-                return base_loss
-
-            uniform_neglog = torch.log(
-                torch.tensor(
-                    float(non_blank),
-                    device=log_probs_t.device,
-                    dtype=log_probs_t.dtype,
-                )
-            )
-
-            smoothing_loss = uniform_neglog
-            return (1.0 - epsilon) * base_loss + epsilon * smoothing_loss
 
     def forward(
         self,
@@ -207,7 +165,6 @@ class LitFastConformerCTC(pl.LightningModule):
         def lr_lambda(epoch: int) -> float:
             if epoch < warmup_epochs:
                 return float(epoch + 1) / float(warmup_epochs)
-
             progress = (epoch - warmup_epochs) / max(1.0, float(max_epochs - warmup_epochs))
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return eta_min_factor + (1.0 - eta_min_factor) * cosine
@@ -216,11 +173,7 @@ class LitFastConformerCTC(pl.LightningModule):
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "epoch",
-                "frequency": 1,
-            },
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch", "frequency": 1},
         }
 
     def on_train_epoch_start(self) -> None:
@@ -248,12 +201,17 @@ class LitFastConformerCTC(pl.LightningModule):
                 f"CTC input length smaller than target length. Min(input_len - target_len) = {diff}"
             )
 
-        main_loss = self.ctc_loss_with_label_smoothing(
-            log_probs_t,
-            targets,
-            out_lengths,
-            target_lengths,
-            epsilon=self.cfg.ctc_label_smoothing,
+        autocast_device_type = "cuda" if log_probs_t.is_cuda else "cpu"
+
+        main_loss = ctc_loss_with_label_smoothing(
+            log_probs_t=log_probs_t,
+            targets=targets,
+            input_lengths=out_lengths,
+            target_lengths=target_lengths,
+            blank_id=self.blank_id,
+            lsm_weight=self.cfg.ctc_label_smoothing,
+            autocast_device_type=autocast_device_type,
+            exclude_blank_from_ls=True,
         )
 
         if self.cfg.aux_ctc_weight > 0.0 and aux_log_probs.numel() > 0:
@@ -261,16 +219,19 @@ class LitFastConformerCTC(pl.LightningModule):
             for i in range(aux_log_probs.size(0)):
                 aux_i = aux_log_probs[i].transpose(0, 1)
                 aux_losses.append(
-                    self.ctc_loss_with_label_smoothing(
-                        aux_i,
-                        targets,
-                        out_lengths,
-                        target_lengths,
-                        epsilon=self.cfg.ctc_label_smoothing,
+                    ctc_loss_with_label_smoothing(
+                        log_probs_t=aux_i,
+                        targets=targets,
+                        input_lengths=out_lengths,
+                        target_lengths=target_lengths,
+                        blank_id=self.blank_id,
+                        lsm_weight=self.cfg.ctc_label_smoothing,
+                        autocast_device_type=autocast_device_type,
+                        exclude_blank_from_ls=True,
                     )
                 )
             aux_loss = torch.stack(aux_losses).mean()
-            loss = main_loss + self.cfg.aux_ctc_weight * aux_loss
+            loss = main_loss + float(self.cfg.aux_ctc_weight) * aux_loss
         else:
             aux_loss = torch.tensor(0.0, device=main_loss.device)
             loss = main_loss
@@ -466,7 +427,7 @@ class LitFastConformerCTC(pl.LightningModule):
 
 
 def main(cfg: TrainConfig) -> None:
-    pl.seed_everything(42, workers=True)
+    pl.seed_everything(cfg.seed, workers=True)
 
     train_loader, val_loader, sp = create_dataloaders(
         cfg.data,
