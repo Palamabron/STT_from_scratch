@@ -1,6 +1,10 @@
-import io
-import json
+from loguru import logger
+import sys
 import logging
+
+import json 
+import io
+
 from pathlib import Path
 
 import datasets
@@ -13,8 +17,8 @@ from tqdm import tqdm
 
 import data_config
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+logger.remove() 
+logger.add(sys.stderr, level="INFO")
 
 
 for lib in ["httpx", "urllib3", "fsspec", "datasets"]:
@@ -31,7 +35,7 @@ try:
     datasets.DatasetInfo.__init__ = patched_init
     logger.info("✅ Applied datasets.DatasetInfo patch.")
 except Exception as e:
-    logger.warning(f"⚠️ Patch failed: {e}")
+    logger.warning(f"Patch failed: {e}")
 
 
 def get_cv_features():
@@ -59,11 +63,11 @@ def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
     manifest_path = output_dir / f"{ds_config.name}.jsonl"
 
     if manifest_path.exists():
-        logger.info(f"⏭️  Manifest {manifest_path.name} exists. Skipping.")
+        logger.info(f"⏭Manifest {manifest_path.name} exists. Skipping.")
         return
 
     mode_str = "FAST (Cache)" if not ds_config.use_streaming else "STREAMING"
-    logger.info(f"🚀 Processing: {ds_config.name} | Mode: {mode_str} | Limit: {ds_config.samples}")
+    logger.info(f"Processing: {ds_config.name} | Mode: {mode_str} | Limit: {ds_config.samples}")
 
     load_kwargs = {
         "path": ds_config.hf_id,
@@ -75,7 +79,7 @@ def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
     }
 
     if ds_config.force_features:
-        logger.info(f"   🔧 Applying custom features fix for {ds_config.name}")
+        logger.info(f"Applying custom features fix for {ds_config.name}")
         load_kwargs["features"] = get_cv_features()
 
     try:
@@ -83,7 +87,7 @@ def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
         if not ds_config.use_streaming:
             ds = ds.shuffle(seed=42)
     except Exception as e:
-        logger.error(f"❌ CRITICAL ERROR loading {ds_config.name}: {e}")
+        logger.error(f"CRITICAL ERROR loading {ds_config.name}: {e}")
         return
 
     audio_output_dir = data_config.AUDIO_DIR / ds_config.name
@@ -100,7 +104,7 @@ def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
         except StopIteration:
             break
         except Exception as e:
-            logger.warning(f"⚠️ Sample error in {ds_config.name}: {e}", exc_info=True)
+            logger.warning(f"Sample error in {ds_config.name}: {e}", exc_info=True)
             continue
 
         try:
@@ -157,26 +161,26 @@ def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
         with open(manifest_path, "w", encoding="utf-8") as f:
             for item in data_list:
                 f.write(json.dumps(item) + "\n")
-        logger.info(f"✅ Saved manifest: {manifest_path} ({len(data_list)} samples)")
+        logger.info(f"Saved manifest: {manifest_path} ({len(data_list)} samples)")
     else:
-        logger.warning(f"⚠️ Empty manifest for {ds_config.name}!")
+        logger.warning(f"Empty manifest for {ds_config.name}!")
 
     return manifest_path if data_list else None
 
 
 def merge_manifests(manifest_files, output_file):
-    logger.info(f"🔄 Merging {len(manifest_files)} manifests -> {output_file}")
+    logger.info(f"Merging {len(manifest_files)} manifests -> {output_file}")
     with open(output_file, "w", encoding="utf-8") as outfile:
         for m_file in manifest_files:
             if m_file and m_file.exists():
                 with open(m_file, encoding="utf-8") as infile:
                     for line in infile:
                         outfile.write(line)
-    logger.info("✅ Merge complete.")
+    logger.info("Merge complete.")
 
 
 def train_tokenizer(manifest_path, vocab_size):
-    logger.info(f"🔨 Training Tokenizer (BPE, vocab={vocab_size})...")
+    logger.info(f"Training Tokenizer (BPE, vocab={vocab_size})...")
     corpus_file = data_config.TOKENIZER_CORPUS
 
     with (
@@ -196,7 +200,7 @@ def train_tokenizer(manifest_path, vocab_size):
         input_sentence_size=1000000,
         shuffle_input_sentence=True,
     )
-    logger.info(f"✅ Tokenizer saved: {data_config.TOKENIZER_PREFIX}.model")
+    logger.info(f"Tokenizer saved: {data_config.TOKENIZER_PREFIX}.model")
 
 
 def main():
@@ -213,7 +217,7 @@ def main():
         if m_path:
             train_manifests.append(m_path)
 
-    logger.info("--- 🔵 STARTING VALIDATION DATASETS ---")
+    logger.info("--- STARTING VALIDATION DATASETS ---")
     val_manifests = []
     for ds_conf in data_config.VAL_DATASETS:
         m_path = process_dataset(ds_conf, data_config.INDIVIDUAL_MANIFESTS_DIR)
@@ -227,7 +231,7 @@ def main():
     if val_manifests:
         merge_manifests(val_manifests, data_config.FINAL_VAL_MANIFEST)
 
-    logger.info("=== 🏁 DATA PREPARATION COMPLETE ===")
+    logger.info("=== DATA PREPARATION COMPLETE ===")
 
 
 if __name__ == "__main__":

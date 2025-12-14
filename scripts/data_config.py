@@ -2,12 +2,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv 
-
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- Project Paths ---
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
@@ -31,39 +29,34 @@ TARGET_SR = 16000
 HF_TOKEN_VAL = os.getenv("HF_TOKEN")
 
 
-
 @dataclass
 class DatasetConfig:
-    name: str  
-    hf_id: str  
+    name: str
+    hf_id: str
     split: str
     lang: str
-    samples: int  
-    text_col: str 
+    samples: int
+    text_col: str
     audio_col: str = "audio"
-    config_name: str | None = None 
+    config_name: str | None = None
 
     # Flagi sterujące
-    use_streaming: bool = True 
-    force_features: bool = False 
+    use_streaming: bool = True
+    force_features: bool = False
 
     def __post_init__(self):
-  
         fast_datasets = ["bigos", "pelcra", "fleurs", "mls_pl"]
         if any(x in self.hf_id for x in fast_datasets) or any(
             x in self.name for x in fast_datasets
         ):
-            self.use_streaming = False  
+            self.use_streaming = False
 
-        
         if "common_voice" in self.hf_id:
             self.force_features = True
-            self.use_streaming = True  
+            self.use_streaming = True
 
 
-# --- Dataset Definitions ---
 
-# 1. TRAINING Datasets
 TRAIN_DATASETS = [
     DatasetConfig(
         name="bigos_v2_train",
@@ -130,7 +123,6 @@ TRAIN_DATASETS = [
     ),
 ]
 
-# 2. VALIDATION Datasets
 VAL_DATASETS = [
     DatasetConfig(
         name="bigos_pl_clean_val",
@@ -145,7 +137,7 @@ VAL_DATASETS = [
         name="bigos_pl_noisy_val",
         hf_id="amu-cai/pl-asr-bigos-v2",
         config_name="pwr-azon_spont-20",
-        split="train", 
+        split="train",
         lang="pl",
         samples=3500,
         text_col="ref_orig",
