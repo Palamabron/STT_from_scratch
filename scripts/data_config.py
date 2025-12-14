@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -17,6 +16,7 @@ class Paths:
     final_test_manifest: Path = Path("data/manifests/final/test_final.jsonl")
     final_manifests_dir: Path = Path("data/manifests/final")
 
+
 @dataclass
 class Run:
     target_sr: int = 16000
@@ -26,8 +26,9 @@ class Run:
     shuffle_seed: int = 42
     lowercase_text: bool = True
     normalize_peak: bool = True
-    sample_per_dataset: Optional[int] = None
+    sample_per_dataset: int | None = None
     max_failures: int = 10000
+
 
 @dataclass
 class HuggingFace:
@@ -43,7 +44,7 @@ class DatasetSpec:
     samples: int
     text_col: str
     audio_col: str = "audio"
-    config_name: Optional[str] = None
+    config_name: str | None = None
     use_streaming: bool = True
 
 

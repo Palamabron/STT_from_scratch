@@ -5,7 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import datasets
 import soundfile as sf
@@ -81,7 +81,7 @@ def normalize_peak(audio_tensor: torch.Tensor) -> torch.Tensor:
     return audio_tensor
 
 
-def load_hf_dataset(dataset_spec: DatasetSpec, hf_token: Optional[str], shuffle_seed: int):
+def load_hf_dataset(dataset_spec: DatasetSpec, hf_token: str | None, shuffle_seed: int):
     dataset_obj = datasets.load_dataset(
         path=dataset_spec.hf_id,
         name=dataset_spec.config_name,
@@ -100,8 +100,8 @@ def process_dataset(
     audio_root_dir: Path,
     manifests_root_dir: Path,
     run_config,
-    hf_token: Optional[str],
-) -> Optional[Path]:
+    hf_token: str | None,
+) -> Path | None:
     manifest_path = manifests_root_dir / f"{dataset_spec.name}.jsonl"
     if run_config.skip_existing and manifest_path.exists():
         logger.info(f"Skipping manifest: {manifest_path}")
@@ -192,7 +192,9 @@ def run_pipeline(app_config: AppConfig) -> None:
     root_dir = app_config.paths.root_dir.resolve()
 
     audio_root_dir = resolve_under_root(root_dir, app_config.paths.audio_dir)
-    individual_manifests_dir = resolve_under_root(root_dir, app_config.paths.individual_manifests_dir)
+    individual_manifests_dir = resolve_under_root(
+        root_dir, app_config.paths.individual_manifests_dir
+    )
     final_train_manifest = resolve_under_root(root_dir, app_config.paths.final_train_manifest)
     final_val_manifest = resolve_under_root(root_dir, app_config.paths.final_val_manifest)
 
@@ -240,7 +242,9 @@ def entrypoint() -> None:
     parsed_args, remaining_args = argument_parser.parse_known_args()
 
     base_config = load_yaml_config(parsed_args.config)
-    app_config = tyro.cli(AppConfig, default=base_config, args=remaining_args)  # default=... pattern [web:21][web:1]
+    app_config = tyro.cli(
+        AppConfig, default=base_config, args=remaining_args
+    )  # default=... pattern [web:21][web:1]
     run_pipeline(app_config)
 
 
