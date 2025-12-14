@@ -1,36 +1,41 @@
-import os
-from dataclasses import dataclass
+from __future__ import annotations
+
+from dataclasses import dataclass, field
 from pathlib import Path
-
-from dotenv import load_dotenv
-
-load_dotenv()
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-ROOT_DIR = SCRIPT_DIR.parent
-
-DATA_DIR = ROOT_DIR / "data"
-AUDIO_DIR = DATA_DIR / "audio"
-MANIFEST_DIR = DATA_DIR / "manifests"
-
-INDIVIDUAL_MANIFESTS_DIR = MANIFEST_DIR / "individual"
-FINAL_MANIFEST_DIR = MANIFEST_DIR / "final"
-FINAL_TRAIN_MANIFEST = FINAL_MANIFEST_DIR / "train_final.jsonl"
-FINAL_VAL_MANIFEST = FINAL_MANIFEST_DIR / "val_final.jsonl"
-FINAL_TEST_MANIFEST = FINAL_MANIFEST_DIR / "test_final.jsonl"
-
-MODELS_DIR = ROOT_DIR / "models"
-TOKENIZER_PREFIX = str(MODELS_DIR / "tokenizer_spm_bpe_1024")
-TOKENIZER_CORPUS = DATA_DIR / "tokenizer_corpus.txt"
-
-TARGET_SR = 16000
-
-
-HF_TOKEN_VAL = os.getenv("HF_TOKEN")
+from typing import Optional
 
 
 @dataclass
-class DatasetConfig:
+class Paths:
+    root_dir: Path = Path(".")
+    data_dir: Path = Path("data")
+    audio_dir: Path = Path("data/audio")
+    manifests_dir: Path = Path("data/manifests")
+    individual_manifests_dir: Path = Path("data/manifests/individual")
+    final_train_manifest: Path = Path("data/manifests/final/train_final.jsonl")
+    final_val_manifest: Path = Path("data/manifests/final/val_final.jsonl")
+    final_test_manifest: Path = Path("data/manifests/final/test_final.jsonl")
+    final_manifests_dir: Path = Path("data/manifests/final")
+
+@dataclass
+class Run:
+    target_sr: int = 16000
+    skip_existing: bool = True
+    do_train: bool = True
+    do_val: bool = True
+    shuffle_seed: int = 42
+    lowercase_text: bool = True
+    normalize_peak: bool = True
+    sample_per_dataset: Optional[int] = None
+    max_failures: int = 10000
+
+@dataclass
+class HuggingFace:
+    token_env: str = "HF_TOKEN"
+
+
+@dataclass
+class DatasetSpec:
     name: str
     hf_id: str
     split: str
@@ -38,166 +43,19 @@ class DatasetConfig:
     samples: int
     text_col: str
     audio_col: str = "audio"
-    config_name: str | None = None
-
-    # Flagi sterujące
+    config_name: Optional[str] = None
     use_streaming: bool = True
-    force_features: bool = False
-
-    def __post_init__(self):
-        fast_datasets = ["bigos", "pelcra", "fleurs", "mls_pl"]
-        if any(x in self.hf_id for x in fast_datasets) or any(
-            x in self.name for x in fast_datasets
-        ):
-            self.use_streaming = False
-
-        if "common_voice" in self.hf_id:
-            self.force_features = True
-            self.use_streaming = True
 
 
+@dataclass
+class Datasets:
+    train: list[DatasetSpec] = field(default_factory=list)
+    val: list[DatasetSpec] = field(default_factory=list)
 
-TRAIN_DATASETS = [
-    DatasetConfig(
-        name="bigos_v2_train",
-        hf_id="amu-cai/pl-asr-bigos-v2",
-        config_name="pwr-azon_read-20",
-        split="train",
-        lang="pl",
-        samples=28200,
-        text_col="ref_orig",
-    ),
-    DatasetConfig(
-        name="pelcra_pl_train",
-        hf_id="pelcra/pl-asr-pelcra-for-bigos",
-        config_name="ul-spokes_mix_luz-18",
-        split="train",
-        lang="pl",
-        samples=5000,
-        text_col="ref_orig",
-    ),
-    DatasetConfig(
-        name="cv21_pl_train",
-        hf_id="fsicoli/common_voice_21_0",
-        config_name="pl",
-        split="train",
-        lang="pl",
-        samples=14000,
-        text_col="sentence",
-    ),
-    DatasetConfig(
-        name="mls_pl_train",
-        hf_id="facebook/multilingual_librispeech",
-        config_name="polish",
-        split="train",
-        lang="pl",
-        samples=8000,
-        text_col="transcript",
-    ),
-    DatasetConfig(
-        name="librispeech_train",
-        hf_id="openslr/librispeech_asr",
-        config_name="clean",
-        split="train.360",
-        lang="en",
-        samples=38000,
-        text_col="text",
-    ),
-    DatasetConfig(
-        name="cv21_en_train",
-        hf_id="fsicoli/common_voice_21_0",
-        config_name="en",
-        split="train",
-        lang="en",
-        samples=18000,
-        text_col="sentence",
-    ),
-    DatasetConfig(
-        name="fleurs_pl_train",
-        hf_id="google/fleurs",
-        config_name="pl_pl",
-        split="train",
-        lang="pl",
-        samples=5000,
-        text_col="transcription",
-    ),
-]
 
-VAL_DATASETS = [
-    DatasetConfig(
-        name="bigos_pl_clean_val",
-        hf_id="amu-cai/pl-asr-bigos-v2",
-        config_name="pwr-azon_read-20",
-        split="validation",
-        lang="pl",
-        samples=2500,
-        text_col="ref_orig",
-    ),
-    DatasetConfig(
-        name="bigos_pl_noisy_val",
-        hf_id="amu-cai/pl-asr-bigos-v2",
-        config_name="pwr-azon_spont-20",
-        split="train",
-        lang="pl",
-        samples=3500,
-        text_col="ref_orig",
-    ),
-    DatasetConfig(
-        name="librispeech_val",
-        hf_id="openslr/librispeech_asr",
-        config_name="clean",
-        split="validation",
-        lang="en",
-        samples=2500,
-        text_col="text",
-    ),
-    DatasetConfig(
-        name="cv21_pl_val",
-        hf_id="fsicoli/common_voice_21_0",
-        config_name="pl",
-        split="validation",
-        lang="pl",
-        samples=2000,
-        text_col="sentence",
-    ),
-    DatasetConfig(
-        name="cv21_en_val",
-        hf_id="fsicoli/common_voice_21_0",
-        config_name="en",
-        split="validation",
-        lang="en",
-        samples=2000,
-        text_col="sentence",
-    ),
-    DatasetConfig(
-        name="fleurs_pl_val",
-        hf_id="google/fleurs",
-        config_name="pl_pl",
-        split="validation",
-        lang="pl",
-        samples=750,
-        text_col="transcription",
-    ),
-    DatasetConfig(
-        name="fleurs_en_val",
-        hf_id="google/fleurs",
-        config_name="en_us",
-        split="validation",
-        lang="en",
-        samples=750,
-        text_col="transcription",
-    ),
-    DatasetConfig(
-        name="pelcra_pl_val",
-        hf_id="pelcra/pl-asr-pelcra-for-bigos",
-        config_name="ul-spokes_mix_luz-18",
-        split="validation",
-        lang="pl",
-        samples=1500,
-        text_col="ref_orig",
-    ),
-]
-
-VOCAB_SIZE = 1024
-MODEL_TYPE = "bpe"
-CHARACTER_COVERAGE = 1.0
+@dataclass
+class AppConfig:
+    paths: Paths = field(default_factory=Paths)
+    run: Run = field(default_factory=Run)
+    hf: HuggingFace = field(default_factory=HuggingFace)
+    datasets: Datasets = field(default_factory=Datasets)
