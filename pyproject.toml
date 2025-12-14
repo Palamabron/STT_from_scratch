@@ -18,9 +18,10 @@ dependencies = [
   "librosa",
   "soundfile",
   "torchcodec",
-  "tyro",
+  "pyctcdecode>=0.5.0",
   "pandas",
   "tqdm",
+
 ]
 
 [project.optional-dependencies]

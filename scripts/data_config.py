@@ -2,12 +2,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv  # Wymaga: pip install python-dotenv
+from dotenv import load_dotenv 
 
-# Ładowanie zmiennych z pliku .env (szuka w folderze skryptu lub wyżej)
+
 load_dotenv()
 
-# --- Ścieżki Projektu ---
+# --- Project Paths ---
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT_DIR = SCRIPT_DIR.parent
 
@@ -27,48 +27,43 @@ TOKENIZER_CORPUS = DATA_DIR / "tokenizer_corpus.txt"
 
 TARGET_SR = 16000
 
-# --- Pobranie tokena z .env ---
-# Upewnij się, że w pliku .env masz linię: HF_TOKEN=twój_token_tutaj
+
 HF_TOKEN_VAL = os.getenv("HF_TOKEN")
 
-if HF_TOKEN_VAL is None:
-    print("⚠️  UWAGA: Nie znaleziono zmiennej HF_TOKEN w pliku .env ani w systemie.")
-    print("    Niektóre zbiory (Common Voice, Bigos) mogą wymagać uwierzytelnienia.")
 
 
-# --- Klasa Konfiguracyjna Datasetu ---
 @dataclass
 class DatasetConfig:
-    name: str  # Unikalna nazwa (klucz w słowniku)
-    hf_id: str  # ID z HuggingFace
-    split: str  # Split (train, validation, test)
-    lang: str  # Język (pl, en)
-    samples: int  # Limit próbek
-    text_col: str  # Nazwa kolumny z tekstem
-    audio_col: str = "audio"  # Nazwa kolumny z audio (zazwyczaj "audio")
-    config_name: str | None = None  # Config datasetu (np. "clean", "pl")
+    name: str  
+    hf_id: str  
+    split: str
+    lang: str
+    samples: int  
+    text_col: str 
+    audio_col: str = "audio"
+    config_name: str | None = None 
 
     # Flagi sterujące
-    use_streaming: bool = True  # Czy używać streamingu (domyślnie tak)
-    force_features: bool = False  # Czy aplikować fix dla Common Voice
+    use_streaming: bool = True 
+    force_features: bool = False 
 
     def __post_init__(self):
-        # Automatyczna detekcja trybu szybkiego dla znanych mniejszych zbiorów
+  
         fast_datasets = ["bigos", "pelcra", "fleurs", "mls_pl"]
         if any(x in self.hf_id for x in fast_datasets) or any(
             x in self.name for x in fast_datasets
         ):
-            self.use_streaming = False  # Pobieramy całość na dysk (cache)
+            self.use_streaming = False  
 
-        # Automatyczna detekcja fixa dla Common Voice
+        
         if "common_voice" in self.hf_id:
             self.force_features = True
-            self.use_streaming = True  # CV musi być streamingiem (za duży)
+            self.use_streaming = True  
 
 
-# --- Definicje Zbiorów ---
+# --- Dataset Definitions ---
 
-# 1. Zbiory TRENINGOWE
+# 1. TRAINING Datasets
 TRAIN_DATASETS = [
     DatasetConfig(
         name="bigos_v2_train",
@@ -135,7 +130,7 @@ TRAIN_DATASETS = [
     ),
 ]
 
-# 2. Zbiory WALIDACYJNE
+# 2. VALIDATION Datasets
 VAL_DATASETS = [
     DatasetConfig(
         name="bigos_pl_clean_val",
@@ -150,7 +145,7 @@ VAL_DATASETS = [
         name="bigos_pl_noisy_val",
         hf_id="amu-cai/pl-asr-bigos-v2",
         config_name="pwr-azon_spont-20",
-        split="train",  # Używamy TRAIN (test jest pusty)
+        split="train", 
         lang="pl",
         samples=3500,
         text_col="ref_orig",

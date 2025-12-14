@@ -11,19 +11,15 @@ import torchaudio
 from datasets import Audio, Features, Value
 from tqdm import tqdm
 
-# Import config
 import data_config
-from data_config import DatasetConfig
 
-# --- LOGGING SETUP ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Wyciszanie bibliotek
+
 for lib in ["httpx", "urllib3", "fsspec", "datasets"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
-# --- MONKEY PATCH ---
 try:
     original_init = datasets.DatasetInfo.__init__
 
@@ -38,7 +34,6 @@ except Exception as e:
     logger.warning(f"⚠️ Patch failed: {e}")
 
 
-# --- COMMON VOICE FEATURES ---
 def get_cv_features():
     return Features(
         {
@@ -60,8 +55,7 @@ def get_cv_features():
     )
 
 
-def process_dataset(ds_config: DatasetConfig, output_dir: Path):
-    """Główna funkcja przetwarzająca pojedynczy dataset."""
+def process_dataset(ds_config: data_config.DatasetConfig, output_dir: Path):
     manifest_path = output_dir / f"{ds_config.name}.jsonl"
 
     if manifest_path.exists():
@@ -92,7 +86,6 @@ def process_dataset(ds_config: DatasetConfig, output_dir: Path):
         logger.error(f"❌ CRITICAL ERROR loading {ds_config.name}: {e}")
         return
 
-    # Przygotowanie folderu na audio
     audio_output_dir = data_config.AUDIO_DIR / ds_config.name
     audio_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,25 +100,22 @@ def process_dataset(ds_config: DatasetConfig, output_dir: Path):
         except StopIteration:
             break
         except Exception as e:
-            logger.warning(f"⚠️ Iteration error in {ds_config.name}: {e}")
+            logger.warning(f"⚠️ Sample error in {ds_config.name}: {e}", exc_info=True)
             continue
 
         try:
-            # 1. Pobranie i weryfikacja tekstu
             text = sample.get(ds_config.text_col)
             if not text or len(str(text).strip()) < 2:
                 continue
 
-            # 2. Dekodowanie Audio
-            if ds_config.force_features:  # CV (mp3 bytes)
+            if ds_config.force_features:
                 audio_bytes = sample[ds_config.audio_col]["bytes"]
                 audio_array, orig_sr = sf.read(io.BytesIO(audio_bytes))
-            else:  # Standard (decoded array)
+            else:
                 audio_info = sample[ds_config.audio_col]
                 audio_array = audio_info["array"]
                 orig_sr = audio_info["sampling_rate"]
 
-            # 3. Przetwarzanie (Resample + Normalize)
             tensor_wav = torch.tensor(audio_array, dtype=torch.float32)
             if tensor_wav.ndim == 1:
                 tensor_wav = tensor_wav.unsqueeze(0)
@@ -140,12 +130,10 @@ def process_dataset(ds_config: DatasetConfig, output_dir: Path):
             if max_val > 0:
                 tensor_wav = tensor_wav / (max_val + 1e-6)
 
-            # 4. Zapis WAV (Soundfile)
             filename = f"{ds_config.name}_{count:06d}.wav"
             wav_path = audio_output_dir / filename
             sf.write(str(wav_path), tensor_wav.squeeze().numpy(), data_config.TARGET_SR)
 
-            # 5. Dodanie do listy
             duration = tensor_wav.shape[-1] / data_config.TARGET_SR
             data_list.append(
                 {
@@ -161,12 +149,10 @@ def process_dataset(ds_config: DatasetConfig, output_dir: Path):
             pbar.update(1)
 
         except Exception:
-            # logger.warning(f"Sample error: {e}")
-            continue  # Silent continue for speed
+            continue
 
     pbar.close()
 
-    # Zapis Manifestu
     if data_list:
         with open(manifest_path, "w", encoding="utf-8") as f:
             for item in data_list:
@@ -214,7 +200,6 @@ def train_tokenizer(manifest_path, vocab_size):
 
 
 def main():
-    # Setup
     for p in [
         data_config.INDIVIDUAL_MANIFESTS_DIR,
         data_config.FINAL_MANIFEST_DIR,
@@ -222,15 +207,12 @@ def main():
     ]:
         p.mkdir(parents=True, exist_ok=True)
 
-    # 1. Train
-    logger.info("--- 🟢 STARTING TRAIN DATASETS ---")
     train_manifests = []
     for ds_conf in data_config.TRAIN_DATASETS:
         m_path = process_dataset(ds_conf, data_config.INDIVIDUAL_MANIFESTS_DIR)
         if m_path:
             train_manifests.append(m_path)
 
-    # 2. Validation
     logger.info("--- 🔵 STARTING VALIDATION DATASETS ---")
     val_manifests = []
     for ds_conf in data_config.VAL_DATASETS:
@@ -238,7 +220,6 @@ def main():
         if m_path:
             val_manifests.append(m_path)
 
-    # 3. Finalize
     if train_manifests:
         merge_manifests(train_manifests, data_config.FINAL_TRAIN_MANIFEST)
         train_tokenizer(data_config.FINAL_TRAIN_MANIFEST, data_config.VOCAB_SIZE)
