@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import pandas as pd
 import torch
@@ -17,30 +16,14 @@ from sentencepiece import SentencePieceProcessor
 from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
-from SpeechToText.models.ctc_attention.train import (
-    AudioAugmentConfig,
-    DataConfig,
-    LitFastConformerCTCAttention,
-    OptimizerConfig,
-    SpecAugmentConfig,
-)
-from SpeechToText.models.ctc_attention.train import (
-    TrainConfig as CtcAttnTrainConfig,
-)
+from SpeechToText.dataset import DataConfig
+from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
 from SpeechToText.utils.audio import build_feature_transforms, extract_features
 from SpeechToText.utils.decoding import (
     collect_probs_for_beam,
     decode_batch_with_beam,
     decode_batch_with_greedy,
 )
-
-if not TYPE_CHECKING:
-    main_mod = cast(Any, sys.modules["__main__"])
-    main_mod.TrainConfig = CtcAttnTrainConfig
-    main_mod.OptimizerConfig = OptimizerConfig
-    main_mod.DataConfig = DataConfig
-    main_mod.SpecAugmentConfig = SpecAugmentConfig
-    main_mod.AudioAugmentConfig = AudioAugmentConfig
 
 
 @dataclass
@@ -99,11 +82,11 @@ def init_num_workers(num_workers: int | None) -> int:
 
 
 def build_decoders(
-    cfg: EvaluateConfig,
+    config: EvaluateConfig,
     labels_for_pyctc: list[str],
 ) -> tuple[Any | None, dict[tuple[float, float], Any]]:
     decoder_ctc = None
-    if "beam" in cfg.decode_types:
+    if "beam" in config.decode_types:
         logger.info("Building CTC beam-search decoder (no LM)")
         decoder_ctc = build_ctcdecoder(
             labels=labels_for_pyctc,
@@ -113,15 +96,15 @@ def build_decoders(
         )
 
     decoders_kenlm: dict[tuple[float, float], Any] = {}
-    if "beam_kenlm" in cfg.decode_types:
-        if not cfg.kenlm_model:
+    if "beam_kenlm" in config.decode_types:
+        if not config.kenlm_model:
             raise ValueError("decode_types contains 'beam_kenlm' but kenlm_model is not provided")
-        lm_path = Path(cfg.kenlm_model)
+        lm_path = Path(config.kenlm_model)
         if not lm_path.exists():
             raise FileNotFoundError(f"KenLM model not found: {lm_path}")
         logger.info(f"Building CTC+KenLM decoders from {lm_path}")
-        for alpha in cfg.alphas:
-            for beta in cfg.betas:
+        for alpha in config.alphas:
+            for beta in config.betas:
                 logger.info(f"  -> alpha={alpha}, beta={beta}")
                 decoders_kenlm[(alpha, beta)] = build_ctcdecoder(
                     labels=labels_for_pyctc,
@@ -146,7 +129,7 @@ def process_feature_batch(
     feature_lengths: list[int],
     refs_batch: list[str],
     langs_batch: list[str],
-    cfg: EvaluateConfig,
+    config: EvaluateConfig,
     device: torch.device,
     model: LitFastConformerCTCAttention,
     tokenizer: SentencePieceProcessor,
@@ -168,7 +151,7 @@ def process_feature_batch(
         batch_log_probs = outputs[0]
         batch_out_lengths = outputs[1]
 
-    if "greedy" in cfg.decode_types:
+    if "greedy" in config.decode_types:
         decode_batch_with_greedy(
             batch_log_probs=batch_log_probs,
             batch_lengths=batch_out_lengths,
@@ -189,10 +172,10 @@ def process_feature_batch(
     )
 
     decode_batch_with_beam(
-        decode_types=cfg.decode_types,
-        beam_widths=cfg.beam_widths,
-        alphas=cfg.alphas,
-        betas=cfg.betas,
+        decode_types=config.decode_types,
+        beam_widths=config.beam_widths,
+        alphas=config.alphas,
+        betas=config.betas,
         probs_per_example=probs_list,
         refs=refs_list,
         langs=langs_list,
@@ -211,10 +194,10 @@ def process_feature_batch(
 def evaluate_split(
     split_name: str,
     items: list[dict[str, Any]],
-    cfg: EvaluateConfig,
+    config: EvaluateConfig,
     device: torch.device,
     model: LitFastConformerCTCAttention,
-    data_cfg: DataConfig,
+    data_config: DataConfig,
     mel_spec: torchaudio.transforms.MelSpectrogram,
     amplitude_to_db: torchaudio.transforms.AmplitudeToDB,
     tokenizer: SentencePieceProcessor,
@@ -231,7 +214,7 @@ def evaluate_split(
         dict[str, float],
     ] = {}
 
-    pool = create_pool(cfg.decode_types, cfg.num_workers or 0)
+    pool = create_pool(config.decode_types, config.num_workers or 0)
 
     try:
         feature_tensors: list[torch.Tensor] = []
@@ -240,19 +223,19 @@ def evaluate_split(
         langs_batch: list[str] = []
 
         for example in tqdm(items, desc=f"{split_name} [forward+decode]", leave=False):
-            audio_path = example.get(cfg.audio_key) or example.get("audio_path")
+            audio_path = example.get(config.audio_key) or example.get("audio_path")
             if audio_path is None:
                 raise KeyError(
                     f"Example is missing audio path under keys "
-                    f"'{cfg.audio_key}' or 'audio_path': {example.keys()}",
+                    f"'{config.audio_key}' or 'audio_path': {example.keys()}",
                 )
 
-            text = example[cfg.text_key]
-            lang = example.get(cfg.lang_key, "unknown")
+            text = example[config.text_key]
+            lang = example.get(config.lang_key, "unknown")
 
             features, feat_len = extract_features(
                 audio_path=audio_path,
-                data_cfg=data_cfg,
+                data_config=data_config,
                 mel_spec=mel_spec,
                 amplitude_to_db=amplitude_to_db,
                 device=device,
@@ -263,13 +246,13 @@ def evaluate_split(
             refs_batch.append(text)
             langs_batch.append(lang)
 
-            if len(feature_tensors) >= cfg.batch_size:
+            if len(feature_tensors) >= config.batch_size:
                 process_feature_batch(
                     feature_tensors=feature_tensors,
                     feature_lengths=feature_lengths,
                     refs_batch=refs_batch,
                     langs_batch=langs_batch,
-                    cfg=cfg,
+                    config=config,
                     device=device,
                     model=model,
                     tokenizer=tokenizer,
@@ -287,7 +270,7 @@ def evaluate_split(
                 feature_lengths=feature_lengths,
                 refs_batch=refs_batch,
                 langs_batch=langs_batch,
-                cfg=cfg,
+                config=config,
                 device=device,
                 model=model,
                 tokenizer=tokenizer,
@@ -353,32 +336,32 @@ def build_results_dataframe(results: list[dict[str, Any]]) -> pd.DataFrame:
     return df_all
 
 
-def main(cfg: EvaluateConfig) -> None:
-    device = get_device(cfg.device)
-    cfg.num_workers = init_num_workers(cfg.num_workers)
-    logger.info(f"Using device: {device}, num_workers={cfg.num_workers}")
+def main(config: EvaluateConfig) -> None:
+    device = get_device(config.device)
+    config.num_workers = init_num_workers(config.num_workers)
+    logger.info(f"Using device: {device}, num_workers={config.num_workers}")
 
     tokenizer = SentencePieceProcessor()
-    tokenizer.load(cfg.tokenizer_model)
+    tokenizer.load(config.tokenizer_model)
     vocab_size = tokenizer.get_piece_size()
     logger.info(f"Loaded SentencePiece tokenizer with vocab_size={vocab_size}")
 
-    logger.info(f"Loading checkpoint from {cfg.checkpoint}")
+    logger.info(f"Loading checkpoint from {config.checkpoint}")
     model = LitFastConformerCTCAttention.load_from_checkpoint(
-        cfg.checkpoint,
+        config.checkpoint,
         sp=tokenizer,
         weights_only=False,
     )
     model.eval()
     model.to(device)
 
-    data_cfg = DataConfig(
-        train_manifest=cfg.train_manifest,
-        val_manifest=cfg.val_manifest,
-        tokenizer_model=cfg.tokenizer_model,
-        sample_rate=cfg.sample_rate,
+    data_config = DataConfig(
+        train_manifest=config.train_manifest,
+        val_manifest=config.val_manifest,
+        tokenizer_model=config.tokenizer_model,
+        sample_rate=config.sample_rate,
     )
-    mel_spec, amplitude_to_db = build_feature_transforms(data_cfg)
+    mel_spec, amplitude_to_db = build_feature_transforms(data_config)
     mel_spec.to(device)
     amplitude_to_db.to(device)
 
@@ -386,17 +369,17 @@ def main(cfg: EvaluateConfig) -> None:
     expected_ctc_dim = len(labels_for_pyctc)
     logger.info(f"CTC dim (expected) = {expected_ctc_dim}")
 
-    decoder_ctc, decoders_kenlm = build_decoders(cfg, labels_for_pyctc)
+    decoder_ctc, decoders_kenlm = build_decoders(config, labels_for_pyctc)
 
-    train_items = load_manifest(cfg.train_manifest)
-    val_items = load_manifest(cfg.val_manifest)
+    train_items = load_manifest(config.train_manifest)
+    val_items = load_manifest(config.val_manifest)
     logger.info(f"Loaded manifests: train={len(train_items)}, val={len(val_items)}")
 
-    if cfg.max_samples_per_split is not None:
-        train_items = train_items[: cfg.max_samples_per_split]
-        val_items = val_items[: cfg.max_samples_per_split]
+    if config.max_samples_per_split is not None:
+        train_items = train_items[: config.max_samples_per_split]
+        val_items = val_items[: config.max_samples_per_split]
         logger.info(
-            f"Subsampled to max_samples_per_split={cfg.max_samples_per_split}: "
+            f"Subsampled to max_samples_per_split={config.max_samples_per_split}: "
             f"train={len(train_items)}, val={len(val_items)}"
         )
 
@@ -404,15 +387,15 @@ def main(cfg: EvaluateConfig) -> None:
     for split_name, items in {"train": train_items, "val": val_items}.items():
         if not items:
             continue
-        logger.info(f"Evaluating {split_name} with {', '.join(cfg.decode_types)} decoding")
+        logger.info(f"Evaluating {split_name} with {', '.join(config.decode_types)} decoding")
         all_results.extend(
             evaluate_split(
                 split_name=split_name,
                 items=items,
-                cfg=cfg,
+                config=config,
                 device=device,
                 model=model,
-                data_cfg=data_cfg,
+                data_config=data_config,
                 mel_spec=mel_spec,
                 amplitude_to_db=amplitude_to_db,
                 tokenizer=tokenizer,
@@ -427,7 +410,7 @@ def main(cfg: EvaluateConfig) -> None:
         return
 
     df_all = build_results_dataframe(all_results)
-    output_path = Path(cfg.output_csv)
+    output_path = Path(config.output_csv)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df_all.to_csv(output_path, index=False, na_rep="-")
     logger.info(f"Saved evaluation results to: {output_path}")

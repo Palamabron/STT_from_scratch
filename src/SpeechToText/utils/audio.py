@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torchaudio
 
-from SpeechToText.models.ctc_attention.train import DataConfig
+from SpeechToText.models.common.config import DataConfig
 
 _RESAMPLERS: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
 
@@ -45,7 +45,7 @@ def get_or_create_resampler(
 
 def extract_features(
     audio_path: str,
-    data_cfg: DataConfig,
+    data_config: DataConfig,
     mel_spec: torchaudio.transforms.MelSpectrogram,
     amplitude_to_db: torchaudio.transforms.AmplitudeToDB,
     device: torch.device,
@@ -56,8 +56,8 @@ def extract_features(
     if waveform.dim() == 2 and waveform.size(0) > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
 
-    if sample_rate != data_cfg.sample_rate:
-        resampler = get_or_create_resampler(sample_rate, data_cfg.sample_rate)
+    if sample_rate != data_config.sample_rate:
+        resampler = get_or_create_resampler(sample_rate, data_config.sample_rate)
         waveform = resampler(waveform)
 
     waveform = waveform.to(device)
@@ -66,7 +66,7 @@ def extract_features(
     mel = amplitude_to_db(mel)
     mel = mel.transpose(1, 2).squeeze(0)
 
-    if data_cfg.normalize_features:
+    if data_config.normalize_features:
         mel = (mel - mel.mean(dim=0, keepdim=True)) / (mel.std(dim=0, keepdim=True) + 1e-5)
 
     feature_length = mel.size(0)

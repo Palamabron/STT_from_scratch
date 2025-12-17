@@ -27,7 +27,7 @@ test:
 		--model.d_model 128 \
 		--model.n_layers 2 \
 		--model.num_heads 2 \
-		--optim.learning_rate 3e-4 \
+		--optimizer.learning_rate 3e-4 \
 		--precision 32-true \
 		--wandb_run_name debug-overfit-one
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 import torch
 import torchaudio
 import tyro
+from dataset import DataConfig
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.models.ctc_attention.train import DataConfig, LitFastConformerCTCAttention
+from SpeechToText.models.ctc_attention.train import LitFastConformerCTCAttention
 from SpeechToText.utils.audio import build_feature_transforms, extract_features
 from SpeechToText.utils.decoding import greedy_decode_single
 
@@ -48,30 +49,30 @@ def load_model_and_frontend(
     model.eval()
     model.to(device)
 
-    data_cfg = DataConfig(
+    data_config = DataConfig(
         train_manifest="",
         val_manifest="",
         tokenizer_model=cfg.tokenizer_model,
         sample_rate=cfg.sample_rate,
     )
-    mel_spec, amplitude_to_db = build_feature_transforms(data_cfg)
+    mel_spec, amplitude_to_db = build_feature_transforms(data_config)
     mel_spec.to(device)
     amplitude_to_db.to(device)
 
-    return model, sp, data_cfg, mel_spec, amplitude_to_db
+    return model, sp, data_config, mel_spec, amplitude_to_db
 
 
 @torch.inference_mode()
 def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]:
     device = get_device(cfg.device)
-    model, sp, data_cfg, mel_spec, amplitude_to_db = load_model_and_frontend(cfg)
+    model, sp, data_config, mel_spec, amplitude_to_db = load_model_and_frontend(cfg)
     blank_id = 0
 
     transcripts: list[str] = []
     for path in audio_paths:
         mel, feat_len = extract_features(
             audio_path=path,
-            data_cfg=data_cfg,
+            data_config=data_config,
             mel_spec=mel_spec,
             amplitude_to_db=amplitude_to_db,
             device=device,

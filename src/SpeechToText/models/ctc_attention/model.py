@@ -1,208 +1,185 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchaudio.models import Conformer
 
-from ..ctc.model import FastConformerCTCConfig
+from SpeechToText.models.conformer import FastConformerEncoder, FastConformerEncoderConfig
+from SpeechToText.models.typing import CTCAttnOutput
 
 
 @dataclass
 class AttentionDecoderConfig:
     num_layers: int = 4
     num_heads: int = 4
-    ff_expansion_factor: int = 4
-    dropout: float = 0.15
+    ffn_mult: int = 4
+    dropout: float = 0.1
     max_len: int = 256
 
 
+@dataclass
+class FastConformerCTCAttentionConfig:
+    encoder: FastConformerEncoderConfig = field(default_factory=FastConformerEncoderConfig)
+    aux_interval: int = 4
+    decoder: AttentionDecoderConfig = field(default_factory=AttentionDecoderConfig)
+
+
 class FastConformerCTCAttention(nn.Module):
+    """
+    Encoder: FastConformerEncoder
+    Heads:
+      - CTC head (blank + SP pieces): vocab_size_ctc = sp_vocab_size + 1
+      - Optional aux CTC heads (every aux_interval blocks)
+      - Autoregressive TransformerDecoder over SentencePiece + {pad,bos,eos}:
+          vocab_size_dec = sp_vocab_size + 3
+    """
+
     def __init__(
         self,
-        enc_cfg: FastConformerCTCConfig,
+        cfg: FastConformerCTCAttentionConfig,
+        *,
         ctc_vocab_size: int,
         sp_vocab_size: int,
-        dec_cfg: AttentionDecoderConfig | None = None,
         blank_id: int = 0,
     ) -> None:
         super().__init__()
-        if dec_cfg is None:
-            dec_cfg = AttentionDecoderConfig(
-                num_layers=4,
-                num_heads=enc_cfg.num_heads,
-                ff_expansion_factor=4,
-                dropout=enc_cfg.dropout,
-                max_len=256,
-            )
+        self.cfg = cfg
+        self.blank_id = int(blank_id)
 
-        self.enc_cfg = enc_cfg
-        self.dec_cfg = dec_cfg
-        self.blank_id = blank_id
+        self.sp_vocab_size = int(sp_vocab_size)
+        self.pad_id = self.sp_vocab_size
+        self.bos_id = self.sp_vocab_size + 1
+        self.eos_id = self.sp_vocab_size + 2
+        self.dec_vocab_size = self.sp_vocab_size + 3
 
-        self.conv_downsample = nn.Sequential(
-            nn.Conv1d(
-                in_channels=enc_cfg.features,
-                out_channels=enc_cfg.conv_channels,
-                kernel_size=11,
-                stride=enc_cfg.stride,
-                padding=5,
-            ),
-            nn.ReLU(),
-            nn.Dropout(enc_cfg.dropout),
-        )
-        self.input_proj = nn.Linear(enc_cfg.conv_channels, enc_cfg.d_model)
+        self.encoder = FastConformerEncoder(cfg.encoder)
 
-        self.encoder = Conformer(
-            input_dim=enc_cfg.d_model,
-            num_heads=enc_cfg.num_heads,
-            ffn_dim=enc_cfg.d_model * enc_cfg.ff_expansion_factor,
-            num_layers=enc_cfg.n_layers,
-            depthwise_conv_kernel_size=enc_cfg.conv_kernel_size,
-            dropout=enc_cfg.dropout,
-        )
+        self.ctc_proj = nn.Linear(cfg.encoder.d_model, ctc_vocab_size)
 
-        self.ctc_proj = nn.Linear(enc_cfg.d_model, ctc_vocab_size)
-
-        aux_interval = max(1, enc_cfg.aux_interval)
-        aux_layer_indices: list[int] = []
-        for i in range(enc_cfg.n_layers - 1):
-            if (i + 1) % aux_interval == 0:
-                aux_layer_indices.append(i)
-        self.aux_layer_indices = aux_layer_indices
+        # Aux heads: capture encoder states after selected blocks.
+        self.aux_layers: list[int] = []
+        if cfg.aux_interval > 0:
+            for i in range(cfg.encoder.n_layers - 1):
+                if (i + 1) % cfg.aux_interval == 0:
+                    self.aux_layers.append(i)
         self.aux_projs = nn.ModuleList(
-            [nn.Linear(enc_cfg.d_model, ctc_vocab_size) for _ in aux_layer_indices]
+            [nn.Linear(cfg.encoder.d_model, ctc_vocab_size) for _ in self.aux_layers]
         )
 
-        self.sp_vocab_size = sp_vocab_size
-        self.pad_id = sp_vocab_size
-        self.bos_id = sp_vocab_size + 1
-        self.eos_id = sp_vocab_size + 2
-        self.decoder_vocab_size = sp_vocab_size + 3
+        # Decoder
+        d_cfg = cfg.decoder
+        self.tok_embed = nn.Embedding(self.dec_vocab_size, cfg.encoder.d_model)
+        self.pos_embed = nn.Embedding(d_cfg.max_len, cfg.encoder.d_model)
 
-        d_model = enc_cfg.d_model
-        self.tok_embed = nn.Embedding(self.decoder_vocab_size, d_model)
-        self.pos_embed = nn.Embedding(dec_cfg.max_len, d_model)
-
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model,
-            nhead=dec_cfg.num_heads,
-            dim_feedforward=d_model * dec_cfg.ff_expansion_factor,
-            dropout=dec_cfg.dropout,
+        layer = nn.TransformerDecoderLayer(
+            d_model=cfg.encoder.d_model,
+            nhead=d_cfg.num_heads,
+            dim_feedforward=cfg.encoder.d_model * d_cfg.ffn_mult,
+            dropout=d_cfg.dropout,
             batch_first=True,
         )
-        self.decoder = nn.TransformerDecoder(
-            decoder_layer,
-            num_layers=dec_cfg.num_layers,
-        )
-
-        self.decoder_proj = nn.Linear(d_model, self.decoder_vocab_size)
+        self.decoder = nn.TransformerDecoder(layer, num_layers=d_cfg.num_layers)
+        self.dec_proj = nn.Linear(cfg.encoder.d_model, self.dec_vocab_size)
 
     @staticmethod
-    def _lengths_to_padding_mask(lengths: torch.Tensor) -> torch.Tensor:
-        batch_size = lengths.shape[0]
-        max_length = int(lengths.max().item())
-        return torch.arange(max_length, device=lengths.device).expand(
-            batch_size, max_length
-        ) >= lengths.unsqueeze(1)
-
-    @staticmethod
-    def _generate_square_subsequent_mask(sz: int, device: torch.device) -> torch.Tensor:
+    def _square_subsequent_mask(sz: int, device: torch.device) -> torch.Tensor:
+        # True where positions are masked (upper triangular without diagonal)
         return torch.triu(torch.ones(sz, sz, device=device, dtype=torch.bool), diagonal=1)
 
-    def _encode(
-        self,
-        feats: torch.Tensor,
-        feat_lengths: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        x = feats.transpose(1, 2)
-        x = self.conv_downsample(x)
-        x = x.transpose(1, 2)
+    @staticmethod
+    def _lengths_to_kpm(lengths: torch.Tensor, max_len: int) -> torch.Tensor:
+        ids = torch.arange(max_len, device=lengths.device).unsqueeze(0)
+        return ids >= lengths.unsqueeze(1)
 
-        stride = self.enc_cfg.stride
-        out_lengths = (feat_lengths + stride - 1) // stride
-
-        x = self.input_proj(x)
-
-        encoder_padding_mask = self._lengths_to_padding_mask(out_lengths)
-        x_t = x.transpose(0, 1)
+    def encode(
+        self, feats: torch.Tensor, feat_lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+          enc: [B,T,D]
+          out_lengths: [B]
+          aux_log_probs: [Naux,B,T,V] or empty
+        """
+        # We need aux states, so we replicate the encoder forward with a hook into blocks.
+        x, out_lengths = self.encoder.sub(feats, feat_lengths)
+        x = self.encoder.in_drop(self.encoder.in_ln(x))
+        kpm = self._lengths_to_kpm(out_lengths, x.size(1))
 
         aux_logits_list: list[torch.Tensor] = []
-        layer_to_head = {layer_i: head_i for head_i, layer_i in enumerate(self.aux_layer_indices)}
+        layer_to_head = {layer_i: head_i for head_i, layer_i in enumerate(self.aux_layers)}
 
-        for layer_idx, layer in enumerate(self.encoder.conformer_layers):
-            x_t = layer(x_t, encoder_padding_mask)
+        for layer_idx, blk in enumerate(self.encoder.blocks):
+            x = blk(x, key_padding_mask=kpm)
             head_idx = layer_to_head.get(layer_idx)
             if head_idx is not None:
-                h = x_t.transpose(0, 1)  # (B, T', D)
-                aux_logits_list.append(self.aux_projs[head_idx](h))  # (B, T', V_ctc)
-
-        enc_out = x_t.transpose(0, 1)
-
-        ctc_logits = self.ctc_proj(enc_out)
-        ctc_log_probs = F.log_softmax(ctc_logits, dim=-1)
+                aux_logits_list.append(self.aux_projs[head_idx](x))  # [B,T,V]
 
         if aux_logits_list:
-            aux_logits = torch.stack(aux_logits_list, dim=0)  # (N_aux, B, T', V_ctc)
+            aux_logits = torch.stack(aux_logits_list, dim=0)  # [Naux,B,T,V]
             aux_log_probs = F.log_softmax(aux_logits, dim=-1)
         else:
-            V = ctc_logits.size(-1)
+            # shape kept consistent with your previous code: [0,B,T,V]
+            logits = self.ctc_proj(x)
             aux_log_probs = torch.empty(
-                0,
-                ctc_logits.size(0),
-                ctc_logits.size(1),
-                V,
-                device=ctc_logits.device,
-                dtype=ctc_logits.dtype,
+                (0, logits.size(0), logits.size(1), logits.size(2)),
+                device=logits.device,
+                dtype=logits.dtype,
             )
 
-        return enc_out, out_lengths, ctc_log_probs, aux_log_probs
+        return x, out_lengths, aux_log_probs
 
-    def _decode(
+    def decode(
         self,
-        enc_out: torch.Tensor,
-        out_lengths: torch.Tensor,
-        decoder_input: torch.Tensor,
+        enc: torch.Tensor,  # [B,T,D]
+        out_lengths: torch.Tensor,  # [B]
+        decoder_input: torch.Tensor,  # [B,U]
     ) -> torch.Tensor:
-        B, L = decoder_input.shape
+        b, u = decoder_input.shape
+        if u > self.cfg.decoder.max_len:
+            raise ValueError(
+                f"decoder_input length {u} > decoder.max_len={self.cfg.decoder.max_len}"
+            )
+
         device = decoder_input.device
+        pos = torch.arange(u, device=device).unsqueeze(0).expand(b, u)
 
-        positions = torch.arange(L, device=device).unsqueeze(0).expand(B, L)
-        tgt = self.tok_embed(decoder_input) + self.pos_embed(positions)
-
+        tgt = self.tok_embed(decoder_input) + self.pos_embed(pos)
         tgt_key_padding_mask = decoder_input.eq(self.pad_id)
-        tgt_mask = self._generate_square_subsequent_mask(L, device=device)
+        tgt_mask = self._square_subsequent_mask(u, device=device)
 
-        max_T = enc_out.size(1)
-        enc_pad_mask = torch.arange(max_T, device=device).unsqueeze(0) >= out_lengths.unsqueeze(1)
+        mem_key_padding_mask = self._lengths_to_kpm(out_lengths, enc.size(1))
 
-        decoded = self.decoder(
+        dec = self.decoder(
             tgt=tgt,
-            memory=enc_out,
+            memory=enc,
             tgt_mask=tgt_mask,
             tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=enc_pad_mask,
+            memory_key_padding_mask=mem_key_padding_mask,
         )
-        logits = self.decoder_proj(decoded)
-        log_probs = F.log_softmax(logits, dim=-1)
-        return log_probs
+
+        logits = self.dec_proj(dec)
+        return F.log_softmax(logits, dim=-1)  # [B,U,V_dec]
 
     def forward(
         self,
         feats: torch.Tensor,
         feat_lengths: torch.Tensor,
         decoder_input: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        """
-        Returns CTC and optional attention decoder log-probabilities.
-        """
-        enc_out, out_lengths, ctc_log_probs, aux_log_probs = self._encode(feats, feat_lengths)
+    ) -> CTCAttnOutput:
+        enc, out_lengths, aux_log_probs = self.encode(feats, feat_lengths)
 
-        if decoder_input is not None:
-            dec_log_probs = self._decode(enc_out, out_lengths, decoder_input)
-        else:
-            dec_log_probs = None
+        ctc_logits = self.ctc_proj(enc)
+        ctc_log_probs = F.log_softmax(ctc_logits, dim=-1)
 
-        return ctc_log_probs, out_lengths, aux_log_probs, dec_log_probs
+        dec_log_probs = (
+            self.decode(enc, out_lengths, decoder_input) if decoder_input is not None else None
+        )
+
+        return CTCAttnOutput(
+            ctc_log_probs=ctc_log_probs,
+            out_lengths=out_lengths,
+            aux_log_probs=aux_log_probs,
+            dec_log_probs=dec_log_probs,
+        )

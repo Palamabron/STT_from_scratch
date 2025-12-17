@@ -14,7 +14,7 @@ dependencies = [
   "tyro",
   "wandb",
   "python-dotenv",
-  "datasets<=3.6.0",
+  "datasets~=2.21",
   "librosa",
   "soundfile",
   "torchcodec",
@@ -23,6 +23,7 @@ dependencies = [
   "pandas>=2.3.3",
   "tqdm>=4.67.1",
   "editdistance>=0.8.1",
+  "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]

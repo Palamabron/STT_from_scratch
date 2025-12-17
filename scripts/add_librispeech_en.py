@@ -20,7 +20,6 @@ class EnBalanceConfig:
 
     audio_root: Path = Path("data/multilingual_asr/audio_en_extra")
     max_duration: float = 60.0
-    min_duration: float = 0.1
 
 
 def count_lang_examples(manifest: Path) -> dict[str, int]:
@@ -45,7 +44,6 @@ def add_librispeech_split(
     needed_samples: int,
     audio_dir: Path,
     out_manifest: Path,
-    min_duration: float,
     max_duration: float,
 ) -> int:
     if needed_samples <= 0:
@@ -74,7 +72,9 @@ def add_librispeech_split(
             arr = np.asarray(audio["array"], dtype="float32")
             sr = int(audio["sampling_rate"])
             dur = float(len(arr) / sr)
-            if dur < min_duration or dur > max_duration:
+            if dur is None:
+                continue
+            if dur > max_duration:
                 continue
 
             wav_name = f"librispeech_{split}_{added:07d}.wav"
