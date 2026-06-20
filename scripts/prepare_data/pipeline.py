@@ -17,6 +17,7 @@ from .buckets import (
 from .config import AppConfig, DatasetSpec
 from .hf_loader import resolve_under_root
 from .manifest import process_train_source, process_val_source
+from .overlap import assert_no_overlap, assert_val_has_no_train_bucket_names
 
 
 def build_train_final_from_buckets(
@@ -88,6 +89,20 @@ def _build_final_from_buckets(
                     underdelivery_policy,
                     f"Bucket '{bucket_name}': final manifest kept={kept} target={target}",
                 )
+
+
+def validate_final_manifests(app_config: AppConfig) -> None:
+    """Ensure train/val finals exist and do not overlap."""
+    root_dir = app_config.paths.root_dir.resolve()
+    train_out = resolve_under_root(root_dir, app_config.paths.final_train_manifest)
+    val_out = resolve_under_root(root_dir, app_config.paths.final_val_manifest)
+    if not train_out.exists() or not val_out.exists():
+        return
+
+    train_bucket_names = set(group_by_name(app_config.datasets.train))
+    assert_no_overlap(train_out, val_out)
+    assert_val_has_no_train_bucket_names(val_out, train_bucket_names)
+    logger.info("Validated train/val final manifests: no overlap detected")
 
 
 def run_pipeline(app_config: AppConfig) -> None:
@@ -178,3 +193,5 @@ def run_pipeline(app_config: AppConfig) -> None:
             output_manifest=final_val_manifest,
         )
         logger.info(f"Wrote: {final_val_manifest}")
+
+    validate_final_manifests(app_config)

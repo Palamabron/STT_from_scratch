@@ -23,8 +23,11 @@ class CTCAttnOutput(NamedTuple):
 
 
 class TDTOutput(NamedTuple):
-    """Outputs from the token-and-duration transducer model."""
+    """Outputs from the RNN-T / TDT transducer model."""
 
     log_probs: torch.Tensor
     out_lengths: torch.Tensor
     target_lengths: torch.Tensor
+    token_logits: torch.Tensor | None = None
+    duration_logits: torch.Tensor | None = None
+    duration_log_probs: torch.Tensor | None = None

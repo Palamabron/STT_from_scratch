@@ -17,9 +17,17 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
 from SpeechToText.dataset import DataConfig, FeatureConfig, ManifestPaths
-from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
+from SpeechToText.models.common.inference import (
+    ModelType,
+    forward_ctc_log_probs,
+    forward_tdt_joint,
+    load_lit_module,
+    module_uses_tdt,
+)
+from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, greedy_tdt_decode_one
 from SpeechToText.utils.decoding import (
     collect_probs_for_beam,
+    compute_wer_cer,
     decode_batch_with_beam,
     decode_batch_with_greedy,
 )
@@ -47,6 +55,8 @@ class EvaluateConfig:
     output_csv: str = "results/eval/evaluation_results.csv"
     batch_size: int = 64
     num_workers: int | None = None
+    model_type: ModelType = "auto"
+    val_max_symbols_per_t: int = 4
 
 
 def load_manifest(path: str) -> list[dict[str, Any]]:
@@ -139,7 +149,8 @@ def process_audio_batch(
     langs_batch: list[str],
     config: EvaluateConfig,
     device: torch.device,
-    model: LitFastConformerCTCAttention,
+    model: torch.nn.Module,
+    model_type: ModelType,
     tokenizer: SentencePieceProcessor,
     labels_for_pyctc: list[str],
     decoder_ctc: Any | None,
@@ -154,45 +165,92 @@ def process_audio_batch(
     padded_audio = pad_sequence(audio_tensors, batch_first=True).to(device)
     lengths_tensor = torch.tensor(audio_lengths, device=device, dtype=torch.long)
 
-    with torch.inference_mode():
-        feats, feat_lens = model.featurizer(padded_audio, lengths_tensor)
-        out = model(feats, feat_lens, decoder_input=None)
-        batch_log_probs = out.ctc_log_probs
-        batch_out_lengths = out.out_lengths
+    if model_type == "tdt":
+        with torch.inference_mode():
+            token_log_probs, duration_log_probs, batch_out_lengths = forward_tdt_joint(
+                model, padded_audio, lengths_tensor
+            )
+        use_tdt = duration_log_probs is not None and module_uses_tdt(model)
+        for index in range(token_log_probs.size(0)):
+            out_len = int(batch_out_lengths[index].item())
+            if use_tdt and duration_log_probs is not None:
+                ids = greedy_tdt_decode_one(
+                    token_log_probs[index : index + 1],
+                    duration_log_probs[index : index + 1],
+                    out_length=out_len,
+                    max_symbols_per_t=config.val_max_symbols_per_t,
+                    blank_id=blank_id,
+                )
+            else:
+                ids = greedy_rnnt_path_decode_one(
+                    token_log_probs[index : index + 1],
+                    out_length=out_len,
+                    max_symbols_per_t=config.val_max_symbols_per_t,
+                    blank_id=blank_id,
+                )
+            sp_ids = [token_id - 1 for token_id in ids if token_id != blank_id and token_id > 0]
+            hyp = "" if not sp_ids else tokenizer.decode_ids(sp_ids)
+            ref = refs_batch[index]
+            lang = langs_batch[index]
+            wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
+            if werden == 0 and cerden == 0:
+                continue
+            for lang_key in ("all", lang):
+                key = ("greedy", None, None, None, lang_key)
+                state = metrics.setdefault(
+                    key,
+                    {
+                        "wer_num": 0.0,
+                        "wer_den": 0.0,
+                        "cer_num": 0.0,
+                        "cer_den": 0.0,
+                        "count": 0.0,
+                    },
+                )
+                state["wer_num"] += float(wernum)
+                state["wer_den"] += float(werden)
+                state["cer_num"] += float(cernum)
+                state["cer_den"] += float(cerden)
+                state["count"] += 1.0
+    else:
+        with torch.inference_mode():
+            batch_log_probs, batch_out_lengths = forward_ctc_log_probs(
+                model, padded_audio, lengths_tensor, model_type
+            )
 
-    if "greedy" in config.decode_types:
-        decode_batch_with_greedy(
+        if "greedy" in config.decode_types:
+            decode_batch_with_greedy(
+                batch_log_probs=batch_log_probs,
+                batch_lengths=batch_out_lengths,
+                batch_refs=refs_batch,
+                batch_langs=langs_batch,
+                tokenizer=tokenizer,
+                blank_id=blank_id,
+                metrics=metrics,
+            )
+
+        vocab_size_with_blank = len(labels_for_pyctc)
+        probs_list, refs_list, langs_list = collect_probs_for_beam(
             batch_log_probs=batch_log_probs,
             batch_lengths=batch_out_lengths,
             batch_refs=refs_batch,
             batch_langs=langs_batch,
-            tokenizer=tokenizer,
-            blank_id=blank_id,
-            metrics=metrics,
+            vocab_size_with_blank=vocab_size_with_blank,
         )
 
-    vocab_size_with_blank = len(labels_for_pyctc)
-    probs_list, refs_list, langs_list = collect_probs_for_beam(
-        batch_log_probs=batch_log_probs,
-        batch_lengths=batch_out_lengths,
-        batch_refs=refs_batch,
-        batch_langs=langs_batch,
-        vocab_size_with_blank=vocab_size_with_blank,
-    )
-
-    decode_batch_with_beam(
-        decode_types=config.decode_types,
-        beam_widths=config.beam_widths,
-        alphas=config.alphas,
-        betas=config.betas,
-        probs_per_example=probs_list,
-        refs=refs_list,
-        langs=langs_list,
-        decoder_ctc=decoder_ctc,
-        decoders_kenlm=decoders_kenlm,
-        pool=pool,
-        metrics=metrics,
-    )
+        decode_batch_with_beam(
+            decode_types=config.decode_types,
+            beam_widths=config.beam_widths,
+            alphas=config.alphas,
+            betas=config.betas,
+            probs_per_example=probs_list,
+            refs=refs_list,
+            langs=langs_list,
+            decoder_ctc=decoder_ctc,
+            decoders_kenlm=decoders_kenlm,
+            pool=pool,
+            metrics=metrics,
+        )
 
     audio_tensors.clear()
     audio_lengths.clear()
@@ -205,7 +263,8 @@ def evaluate_split(
     items: list[dict[str, Any]],
     config: EvaluateConfig,
     device: torch.device,
-    model: LitFastConformerCTCAttention,
+    model: torch.nn.Module,
+    model_type: ModelType,
     sample_rate: int,
     tokenizer: SentencePieceProcessor,
     labels_for_pyctc: list[str],
@@ -255,6 +314,7 @@ def evaluate_split(
                     config=config,
                     device=device,
                     model=model,
+                    model_type=model_type,
                     tokenizer=tokenizer,
                     labels_for_pyctc=labels_for_pyctc,
                     decoder_ctc=decoder_ctc,
@@ -273,6 +333,7 @@ def evaluate_split(
                 config=config,
                 device=device,
                 model=model,
+                model_type=model_type,
                 tokenizer=tokenizer,
                 labels_for_pyctc=labels_for_pyctc,
                 decoder_ctc=decoder_ctc,
@@ -347,13 +408,18 @@ def main(config: EvaluateConfig) -> None:
     logger.info(f"Loaded SentencePiece tokenizer with vocab_size={sp_vocab}")
 
     logger.info(f"Loading checkpoint from {config.checkpoint}")
-    model = LitFastConformerCTCAttention.load_from_checkpoint(
+    model, resolved_type = load_lit_module(
         config.checkpoint,
         sp=tokenizer,
-        weights_only=False,
+        model_type=config.model_type,
     )
     model.eval()
     model.to(device)
+    logger.info(f"Loaded model type: {resolved_type}")
+
+    if resolved_type == "tdt" and any(d != "greedy" for d in config.decode_types):
+        logger.warning("TDT evaluation supports greedy decoding only; ignoring beam decode types")
+        config.decode_types = ("greedy",)
 
     _ = DataConfig(
         manifests=ManifestPaths(train=config.train_manifest, val=config.val_manifest),
@@ -391,6 +457,7 @@ def main(config: EvaluateConfig) -> None:
                 config=config,
                 device=device,
                 model=model,
+                model_type=resolved_type,
                 sample_rate=config.sample_rate,
                 tokenizer=tokenizer,
                 labels_for_pyctc=labels_for_pyctc,

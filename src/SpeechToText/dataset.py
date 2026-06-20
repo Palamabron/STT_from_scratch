@@ -56,6 +56,7 @@ class LoaderConfig:
     seed: int = 42
     multiprocessing_context: str | None = "fork"
     cache_audio: bool = False
+    stratify_by_language: bool = True
 
 
 @dataclass(slots=True)
@@ -350,8 +351,12 @@ class DurationBatchSampler(Sampler[list[int]]):
         shuffle: bool = True,
         seed: int = 42,
         min_batch_size: int = 1,
+        languages: list[str] | None = None,
+        stratify_by_language: bool = False,
     ) -> None:
         self.durations: Final[list[float]] = durations
+        self.languages: Final[list[str] | None] = languages
+        self.stratify_by_language: Final[bool] = bool(stratify_by_language)
         self.max_batch_duration: Final[float] = float(max_batch_duration)
         self.max_batch_size: Final[int] = int(max_batch_size)
         self.bucket_size: Final[int] = int(bucket_size)
@@ -374,12 +379,8 @@ class DurationBatchSampler(Sampler[list[int]]):
     def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
 
-    def __iter__(self) -> Iterator[list[int]]:
-        generator = torch.Generator()
-        generator.manual_seed(self.seed + self._epoch if self.shuffle else self.seed)
-        indices = torch.randperm(self._num_samples, generator=generator).tolist()
-
-        for start in range(0, self._num_samples, self.bucket_size):
+    def _yield_batches(self, indices: list[int]) -> Iterator[list[int]]:
+        for start in range(0, len(indices), self.bucket_size):
             bucket = indices[start : start + self.bucket_size]
             bucket.sort(key=lambda idx: self.durations[idx])
 
@@ -406,6 +407,33 @@ class DurationBatchSampler(Sampler[list[int]]):
 
             if batch and len(batch) >= self.min_batch_size:
                 yield batch
+
+    def __iter__(self) -> Iterator[list[int]]:
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self._epoch if self.shuffle else self.seed)
+
+        if self.stratify_by_language and self.languages is not None:
+            by_lang: dict[str, list[int]] = {}
+            for index in range(self._num_samples):
+                language = self.languages[index]
+                by_lang.setdefault(language, []).append(index)
+
+            batches: list[list[int]] = []
+            for lang_indices in by_lang.values():
+                lang_order = torch.randperm(len(lang_indices), generator=generator).tolist()
+                shuffled = [lang_indices[i] for i in lang_order]
+                batches.extend(list(self._yield_batches(shuffled)))
+
+            if self.shuffle:
+                batch_order = torch.randperm(len(batches), generator=generator).tolist()
+                for batch_index in batch_order:
+                    yield batches[batch_index]
+            else:
+                yield from batches
+            return
+
+        indices = torch.randperm(self._num_samples, generator=generator).tolist()
+        yield from self._yield_batches(indices)
 
     def __len__(self) -> int:
         total_duration = sum(self.durations)
@@ -474,6 +502,8 @@ def create_dataloaders(
             shuffle=bool(data_config.loader.shuffle),
             seed=int(data_config.loader.seed),
             min_batch_size=1,
+            languages=train_ds.langs,
+            stratify_by_language=bool(data_config.loader.stratify_by_language),
         )
         train_loader = DataLoader(
             train_ds,

@@ -22,8 +22,8 @@ class BaseTrainConfig:
     data: DataConfig = field(default_factory=DataConfig)
     spec_augment: SpecAugmentConfig = field(default_factory=SpecAugmentConfig)
     audio_augment: AudioAugmentConfig = field(default_factory=AudioAugmentConfig)
-    spec_augment_start_epoch: int = 0
-    audio_augment_start_epoch: int = 3
+    spec_augment_start_epoch: int = 16
+    audio_augment_start_epoch: int = 7
     seed: int = 42
     ckpt_path: str | None = None
     max_epochs: int = 50
@@ -34,3 +34,7 @@ class BaseTrainConfig:
     precision: PrecisionType = "32-true"
     wandb_project: str = "multilingual_asr"
     wandb_run_name: str | None = None
+    use_wandb: bool = True
+    use_swa: bool = False
+    swa_epoch_start: int = 45
+    swa_lrs: float = 1e-4

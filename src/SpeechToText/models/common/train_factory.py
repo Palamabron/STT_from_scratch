@@ -4,8 +4,13 @@ from typing import Any, Protocol
 
 import lightning.pytorch as pl
 import torch
-from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelCheckpoint
-from lightning.pytorch.loggers import Logger
+from lightning.pytorch.callbacks import (
+    Callback,
+    LearningRateMonitor,
+    ModelCheckpoint,
+    StochasticWeightAveraging,
+)
+from lightning.pytorch.loggers import Logger, WandbLogger
 from torch.utils.data import DataLoader
 
 from SpeechToText.augmentation import load_audio_bank
@@ -61,6 +66,17 @@ def apply_ctc_augment_banks(config: TrainRunConfig) -> tuple[tuple[torch.Tensor,
     return noise_bank, rir_bank
 
 
+def build_training_logger(config: TrainRunConfig) -> Logger | bool:
+    use_wandb = bool(getattr(config, "use_wandb", True))
+    if not use_wandb:
+        return False
+    return WandbLogger(
+        project=str(getattr(config, "wandb_project", "multilingual_asr")),
+        name=getattr(config, "wandb_run_name", None),
+        log_model=False,
+    )
+
+
 def build_checkpoint_callback(
     checkpoint_dir: str,
     *,
@@ -81,7 +97,7 @@ def build_trainer(
     config: TrainRunConfig,
     *,
     train_loader: DataLoader,
-    logger: Logger,
+    logger: Logger | bool,
     extra_callbacks: list[Callback] | None = None,
     monitor: str = "val/wer/overall",
     checkpoint_dir: str | None = None,
@@ -98,6 +114,17 @@ def build_trainer(
     ]
     if extra_callbacks:
         callbacks.extend(extra_callbacks)
+
+    if bool(getattr(config, "use_swa", False)):
+        swa_start = int(getattr(config, "swa_epoch_start", 45))
+        swa_lrs = float(getattr(config, "swa_lrs", 1e-4))
+        callbacks.append(
+            StochasticWeightAveraging(
+                swa_lrs=swa_lrs,
+                swa_epoch_start=swa_start,
+                annealing_epochs=1,
+            ),
+        )
 
     return pl.Trainer(
         max_epochs=config.max_epochs,
@@ -122,7 +149,7 @@ def run_training(
     model: pl.LightningModule,
     train_loader: DataLoader,
     val_loader: DataLoader,
-    logger: Logger,
+    logger: Logger | bool,
     extra_callbacks: list[Callback] | None = None,
     monitor: str = "val/wer/overall",
     checkpoint_dir: str | None = None,

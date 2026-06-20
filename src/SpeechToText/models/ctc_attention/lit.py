@@ -9,14 +9,15 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.augmentation import SpecAugment
+from SpeechToText.augmentation import GPUAudioAugmentation, SpecAugment
 from SpeechToText.features import WaveformFeaturizer
 from SpeechToText.models.common import (
     ExamplesBuffer,
     ctc_ids_to_texts_spm,
     greedy_ctc_decode,
-    wer_cer_by_lang,
+    wer_cer_by_lang_with_mer,
 )
+from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
 from SpeechToText.models.common.optimizers import configure_adamw_noam
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
@@ -34,6 +35,8 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self,
         config: Any,
         sp: SentencePieceProcessor,
+        rir_bank: tuple[torch.Tensor, ...] | None = None,
+        noise_bank: tuple[torch.Tensor, ...] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -46,12 +49,14 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self.bos_id = sp.bos_id() + 1
         self.eos_id = sp.eos_id() + 1
 
+        gpu_augment = GPUAudioAugmentation(config.audio_augment, rir_bank, noise_bank)
         spec_augment = SpecAugment(
             config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
         )
         self.featurizer = WaveformFeaturizer(
             config.data.features,
             spec_augment=spec_augment,
+            gpu_augment=gpu_augment,
         )
 
         self.net = FastConformerCTCAttention(
@@ -67,7 +72,11 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self.attn_loss = nn.NLLLoss(ignore_index=self.pad_id, reduction="mean")
         self.examples = ExamplesBuffer(per_lang=2)
         self._val_examples = WorstValExamplesCollector(max_examples=50)
-        self.save_hyperparameters(ignore=["sp"])
+        self.save_hyperparameters(ignore=["sp", "rir_bank", "noise_bank"])
+
+        self._val_texts_pred: list[str] = []
+        self._val_texts_ref: list[str] = []
+        self._val_langs: list[str] = []
 
     def on_fit_start(self) -> None:
         self.featurizer = self.featurizer.to(self.device)
@@ -144,15 +153,21 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         out = self.forward(feats, feat_lens, decoder_input=dec_in)
         assert out.dec_log_probs is not None
 
-        if (out.out_lengths < target_lengths).any():
-            skipped = int((out.out_lengths < target_lengths).sum().item())
-            logger.warning(
-                "CTC input length < target length for {} utterances after augmentation; "
-                "skipping batch.",
-                skipped,
-            )
+        filtered = filter_batch_by_encoder_length(batch, out.out_lengths, target_lengths)
+        if filtered is None:
             return None
+        if filtered[0] is not batch:
+            batch = filtered[0]
+            audio = batch["audio"]
+            audio_lengths = batch["audio_length"]
+            targets = batch["targets"]
+            target_lengths = batch["target_length"]
+            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
+            out = self.forward(feats, feat_lens, decoder_input=dec_in)
+            assert out.dec_log_probs is not None
 
+        assert out.dec_log_probs is not None
         losses = compute_ctc_attn_losses(
             ctc_log_probs=out.ctc_log_probs,
             out_lengths=out.out_lengths,
@@ -182,7 +197,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
         return losses.total
 
-    def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
+    def validation_step(self, batch: ValBatch, batch_idx: int) -> None:
         audio = batch["audio"]
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
@@ -194,14 +209,19 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         loss = self.ctc_loss(
             out.ctc_log_probs.transpose(0, 1), targets, out.out_lengths, target_lengths
         )
+        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=audio.size(0))
 
         decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=self.blank_id)
         self._val_examples.accumulate_blank_stats(out.ctc_log_probs, out.out_lengths, self.blank_id)
         pred_texts = ctc_ids_to_texts_spm(self.sp, decoded)
 
-        texts_ref = batch.get("text", [])
+        texts_ref = batch["text"]
         langs = batch.get("language", ["unknown"] * len(pred_texts))
         datasets = batch.get("dataset", ["unknown"] * len(pred_texts))
+
+        self._val_texts_pred.extend(pred_texts)
+        self._val_texts_ref.extend(texts_ref)
+        self._val_langs.extend(langs)
 
         for index, (ref, hyp, lang) in enumerate(zip(texts_ref, pred_texts, langs, strict=True)):
             self.examples.add(lang, ref, hyp)
@@ -213,20 +233,22 @@ class LitFastConformerCTCAttention(pl.LightningModule):
                 audio=audio[index, : int(audio_lengths[index].item())],
             )
 
-        metrics = wer_cer_by_lang(batch["text"], pred_texts, batch.get("language"))
-
-        batch_size = audio.size(0)
-        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=batch_size)
-        self.log_dict(
-            {f"val/{k}": v for k, v in metrics.items()}, on_epoch=True, batch_size=batch_size
-        )
-
-        return {"wer": metrics["wer/overall"]}
-
     def on_validation_epoch_start(self) -> None:
+        self._val_texts_pred.clear()
+        self._val_texts_ref.clear()
+        self._val_langs.clear()
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
+        if not self._val_texts_ref:
+            self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
+        else:
+            metrics = wer_cer_by_lang_with_mer(
+                self._val_texts_ref, self._val_texts_pred, self._val_langs
+            )
+            for name, value in metrics.items():
+                self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
+
         self.log(
             "val/blank_fraction",
             self._val_examples.blank_fraction(),

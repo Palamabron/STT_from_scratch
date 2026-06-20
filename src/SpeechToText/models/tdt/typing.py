@@ -9,3 +9,4 @@ class TDTLosses(NamedTuple):
     total: torch.Tensor
     rnnt: torch.Tensor
     lsm: torch.Tensor
+    tdt: torch.Tensor

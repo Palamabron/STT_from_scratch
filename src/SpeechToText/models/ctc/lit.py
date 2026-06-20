@@ -16,6 +16,7 @@ from SpeechToText.models.common import (
     ctc_ids_to_texts_spm,
     greedy_ctc_decode,
 )
+from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
 from SpeechToText.models.common.optimizers import configure_adamw_noam
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
@@ -118,14 +119,24 @@ class LitFastConformerCTC(pl.LightningModule):
         time_steps = int(log_probs.size(1))
         ctc_in_lens = out.out_lengths.clamp(max=time_steps)
 
-        if (ctc_in_lens < target_lengths).any():
-            skipped = int((ctc_in_lens < target_lengths).sum().item())
-            logger.warning(
-                "CTC input length < target length for {} utterances after augmentation; "
-                "skipping batch.",
-                skipped,
-            )
+        filtered = filter_batch_by_encoder_length(batch, ctc_in_lens, target_lengths)
+        if filtered is None:
             return None
+        if filtered[0] is not batch:
+            batch = filtered[0]
+            audio = batch["audio"]
+            audio_lengths = batch["audio_length"]
+            targets = batch["targets"]
+            target_lengths = batch["target_length"]
+            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            out = self.net(feats, feat_lens)
+            log_probs = cast(torch.Tensor, out.log_probs)
+            aux_log_probs = cast(torch.Tensor, out.aux_log_probs)
+            if aux_log_probs is None:
+                aux_log_probs = torch.empty(0, device=self.device)
+            ctc_in_lens = out.out_lengths.clamp(max=int(log_probs.size(1)))
+        else:
+            _, ctc_in_lens, target_lengths, _ = filtered
 
         losses = compute_ctc_losses(
             log_probs=log_probs,
@@ -196,13 +207,15 @@ class LitFastConformerCTC(pl.LightningModule):
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
-        from SpeechToText.models.common import wer_cer_by_lang
+        from SpeechToText.models.common import wer_cer_by_lang_with_mer
 
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
             return
 
-        metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
+        metrics = wer_cer_by_lang_with_mer(
+            self._val_texts_ref, self._val_texts_pred, self._val_langs
+        )
 
         for name, value in metrics.items():
             self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)

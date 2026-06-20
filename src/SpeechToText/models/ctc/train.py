@@ -8,13 +8,13 @@ import warnings
 from dataclasses import dataclass, field
 
 import tyro
-from lightning.pytorch.loggers import WandbLogger
 
 from SpeechToText.augmentation import DEFAULT_NOISE_BANK_PATH, DEFAULT_RIR_BANK_PATH
 from SpeechToText.dataset import create_dataloaders
 from SpeechToText.models.common.config import BaseOptimizerConfig, BaseTrainConfig, PrecisionType
 from SpeechToText.models.common.train_factory import (
     apply_ctc_augment_banks,
+    build_training_logger,
     configure_matmul_precision,
     run_training,
     wire_data_filter_from_model,
@@ -70,10 +70,7 @@ def main(config: TrainConfig) -> None:
         noise_bank=noise_bank,
     )
 
-    wandb_logger = WandbLogger(
-        project=config.wandb_project,
-        name=config.wandb_run_name,
-    )
+    wandb_logger = build_training_logger(config)
 
     run_training(
         config=config,

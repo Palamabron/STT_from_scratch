@@ -8,8 +8,7 @@ import tyro
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.models.common import ctc_ids_to_texts_spm, greedy_ctc_decode
-from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
+from SpeechToText.models.common.inference import ModelType, load_lit_module, transcribe_batch
 
 
 @dataclass
@@ -18,6 +17,8 @@ class TranscribeConfig:
     tokenizer_model: str
     sample_rate: int = 16_000
     device: str = "auto"
+    model_type: ModelType = "auto"
+    val_max_symbols_per_t: int = 4
 
 
 def get_device(device_str: str) -> torch.device:
@@ -36,17 +37,16 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
     sp = SentencePieceProcessor()
     sp.load(cfg.tokenizer_model)
 
-    model = LitFastConformerCTCAttention.load_from_checkpoint(
+    model, resolved_type = load_lit_module(
         cfg.checkpoint,
         sp=sp,
-        weights_only=False,
+        model_type=cfg.model_type,
     )
     model.eval()
     model.to(device)
+    logger.info("Loaded model type: {}", resolved_type)
 
     transcripts: list[str] = []
-    blank_id = 0
-
     for path in audio_paths:
         wav, sr = torchaudio.load(path)
         if wav.dim() == 2 and wav.size(0) > 1:
@@ -56,12 +56,14 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
 
         audio = wav.squeeze(0).unsqueeze(0).to(device)
         audio_lengths = torch.tensor([audio.size(1)], device=device, dtype=torch.long)
-
-        feats, feat_lens = model.featurizer(audio, audio_lengths)
-        out = model(feats, feat_lens, decoder_input=None)
-
-        decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=blank_id)
-        text = ctc_ids_to_texts_spm(sp, decoded)[0]
+        text = transcribe_batch(
+            model,
+            audio,
+            audio_lengths,
+            sp=sp,
+            model_type=resolved_type,
+            val_max_symbols_per_t=cfg.val_max_symbols_per_t,
+        )[0]
         transcripts.append(text)
 
     return transcripts

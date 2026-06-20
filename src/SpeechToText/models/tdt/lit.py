@@ -8,15 +8,17 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.augmentation import SpecAugment
+from SpeechToText.augmentation import GPUAudioAugmentation, SpecAugment
 from SpeechToText.features import WaveformFeaturizer
-from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang
+from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang_with_mer
+from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
 from SpeechToText.models.common.optimizers import configure_adamw_noam
-from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, rnnt_loss_mean
+from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, greedy_tdt_decode_one
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
     log_wandb_worst_val_examples,
 )
+from SpeechToText.models.tdt.loss import compute_tdt_losses
 from SpeechToText.models.tdt.model import FastConformerTDT
 from SpeechToText.models.typing import TDTOutput, TrainBatch, ValBatch
 
@@ -25,12 +27,16 @@ if TYPE_CHECKING:
 
 
 class LitFastConformerTDT(pl.LightningModule):
+    """Lightning module for Fast-Conformer RNN-T / TDT training."""
+
     def __init__(
         self,
         config: TrainConfig,
         *,
         sp: SentencePieceProcessor,
         vocab_size: int,
+        rir_bank: tuple[torch.Tensor, ...] | None = None,
+        noise_bank: tuple[torch.Tensor, ...] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -45,6 +51,8 @@ class LitFastConformerTDT(pl.LightningModule):
         model_config.decoder.d_model = int(model_config.encoder.d_model)
         model_config.joint.enc_d = int(model_config.encoder.d_model)
         model_config.joint.pred_d = int(model_config.encoder.d_model)
+        model_config.joint.use_tdt = bool(config.use_tdt)
+        model_config.joint_fused_batch_size = config.joint_fused_batch_size
 
         feat_cfg = config.data.features
         self.sample_rate = feat_cfg.sample_rate
@@ -52,15 +60,21 @@ class LitFastConformerTDT(pl.LightningModule):
         spec_augment = SpecAugment(
             config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
         )
+        gpu_augment = GPUAudioAugmentation(config.audio_augment, rir_bank, noise_bank)
         self.featurizer = WaveformFeaturizer(
             config.data.features,
             spec_augment=spec_augment,
+            gpu_augment=gpu_augment,
         )
 
         self.net = FastConformerTDT(model_config)
         self.examples = ExamplesBuffer(per_lang=2)
         self._val_examples = WorstValExamplesCollector(max_examples=50)
-        self.save_hyperparameters(ignore=["sp"])
+        self.save_hyperparameters(ignore=["sp", "rir_bank", "noise_bank"])
+
+        self._val_texts_pred: list[str] = []
+        self._val_texts_ref: list[str] = []
+        self._val_langs: list[str] = []
 
     def on_fit_start(self) -> None:
         self.featurizer = self.featurizer.to(self.device)
@@ -80,13 +94,15 @@ class LitFastConformerTDT(pl.LightningModule):
         targets: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> TDTOutput:
-        out = self.net(
-            feats=feats,
-            feat_lengths=feat_lengths,
-            targets_concat=targets,
-            target_lengths=target_lengths,
+        return cast(
+            TDTOutput,
+            self.net(
+                feats=feats,
+                feat_lengths=feat_lengths,
+                targets_concat=targets,
+                target_lengths=target_lengths,
+            ),
         )
-        return cast(TDTOutput, out)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
@@ -103,24 +119,48 @@ class LitFastConformerTDT(pl.LightningModule):
             d_model=d_model,
         )
 
-    def _rnnt_loss(
+    def _transducer_loss(
         self,
-        logits_or_log_probs: torch.Tensor,
-        out_lengths: torch.Tensor,
-        targets_1d_or_2d: torch.Tensor,
+        out: TDTOutput,
+        targets: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> torch.Tensor:
-        return rnnt_loss_mean(
-            logits=logits_or_log_probs,
-            out_lengths=out_lengths,
-            targets_1d_or_2d=targets_1d_or_2d,
+        assert out.token_logits is not None
+
+        targets_padded = FastConformerTDT.pad_targets_from_concat(
+            targets, target_lengths, pad_id=self.blank_id
+        )
+        losses = compute_tdt_losses(
+            token_logits=out.token_logits,
+            duration_logits=out.duration_logits,
+            out_lengths=out.out_lengths,
+            targets_padded=targets_padded,
             target_lengths=target_lengths,
             blank_id=self.blank_id,
-            clamp=float(self.config.rnnt_clamp),
+            label_smoothing=float(self.config.label_smoothing),
+            rnnt_clamp=float(self.config.rnnt_clamp),
             fused_log_softmax=bool(self.config.fused_log_softmax),
+            use_tdt=bool(self.config.use_tdt),
+            tdt_sigma=float(self.config.tdt_sigma),
+            tdt_omega=float(self.config.tdt_omega),
         )
+        return losses.total
 
-    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor:
+    def _maybe_filter_batch(
+        self,
+        batch: TrainBatch | ValBatch,
+        out_lengths: torch.Tensor,
+        target_lengths: torch.Tensor,
+    ) -> tuple[TrainBatch | ValBatch, torch.Tensor, torch.Tensor] | None:
+        if (out_lengths >= target_lengths).all():
+            return batch, out_lengths, target_lengths
+        filtered = filter_batch_by_encoder_length(batch, out_lengths, target_lengths)
+        if filtered is None:
+            return None
+        batch_f, out_lengths_f, target_lengths_f, _ = filtered
+        return batch_f, out_lengths_f, target_lengths_f
+
+    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor | None:
         audio = batch["audio"]
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
@@ -128,8 +168,21 @@ class LitFastConformerTDT(pl.LightningModule):
 
         feats, feat_lens = self._encode_batch(audio, audio_lengths)
         out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
-        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lengths)
 
+        filtered = self._maybe_filter_batch(batch, out.out_lengths, target_lengths)
+        if filtered is None:
+            return None
+        batch_f, _, _ = filtered
+        if batch_f is not batch:
+            batch = batch_f
+            audio = batch["audio"]
+            audio_lengths = batch["audio_length"]
+            targets = batch["targets"]
+            target_lengths = batch["target_length"]
+            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
+
+        loss = self._transducer_loss(out, targets, target_lengths)
         self.log(
             "train/loss",
             loss,
@@ -141,60 +194,89 @@ class LitFastConformerTDT(pl.LightningModule):
         )
         return loss
 
-    def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
+    def _decode_one(self, out: TDTOutput, index: int) -> list[int]:
+        token_lp = out.log_probs[index : index + 1]
+        out_len = int(out.out_lengths[index].item())
+        max_sym = int(self.config.val_max_symbols_per_t)
+        if self.config.use_tdt and out.duration_log_probs is not None:
+            return greedy_tdt_decode_one(
+                token_lp,
+                out.duration_log_probs[index : index + 1],
+                out_length=out_len,
+                max_symbols_per_t=max_sym,
+                blank_id=self.blank_id,
+            )
+        return greedy_rnnt_path_decode_one(
+            token_lp,
+            out_length=out_len,
+            max_symbols_per_t=max_sym,
+            blank_id=self.blank_id,
+        )
+
+    def validation_step(self, batch: ValBatch, batch_idx: int) -> None:
         audio = batch["audio"]
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
         target_lengths = batch["target_length"]
         texts = batch["text"]
-        langs = batch.get("language")
+        langs = batch.get("language", ["unknown"] * len(texts))
 
         feats, feat_lens = self._encode_batch(audio, audio_lengths)
         out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
-        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lengths)
+
+        if self.config.compute_eval_loss:
+            loss = self._transducer_loss(out, targets, target_lengths)
+            self.log(
+                "val/loss",
+                loss,
+                prog_bar=True,
+                on_epoch=True,
+                sync_dist=False,
+                batch_size=audio.size(0),
+            )
 
         bs = audio.size(0)
-        self.log("val/loss", loss, prog_bar=True, on_epoch=True, sync_dist=False, batch_size=bs)
-
         pred_texts: list[str] = []
-        for b in range(bs):
-            ids = greedy_rnnt_path_decode_one(
-                out.log_probs[b : b + 1],
-                out_length=int(out.out_lengths[b].item()),
-                max_symbols_per_t=int(self.config.val_max_symbols_per_t),
-                blank_id=self.blank_id,
-            )
-            sp_ids = [i - 1 for i in ids if i != self.blank_id and i > 0]
+        for index in range(bs):
+            ids = self._decode_one(out, index)
+            sp_ids = [
+                token_id - 1 for token_id in ids if token_id != self.blank_id and token_id > 0
+            ]
             pred_texts.append("" if not sp_ids else self.sp.decode_ids(sp_ids))
 
-        m = wer_cer_by_lang(texts, pred_texts, langs)
-        self.log_dict(
-            {f"val/{k}": v for k, v in m.items()},
-            prog_bar=True,
-            on_epoch=True,
-            sync_dist=False,
-            batch_size=bs,
-        )
+        self._val_texts_pred.extend(pred_texts)
+        self._val_texts_ref.extend(texts)
+        self._val_langs.extend(langs)
 
-        for lang, ref, hyp in zip((langs or ["unknown"] * bs), texts, pred_texts, strict=True):
+        for lang, ref, hyp in zip(langs, texts, pred_texts, strict=True):
             self.examples.add(lang, ref, hyp)
 
         datasets = batch.get("dataset", ["unknown"] * bs)
         for index in range(bs):
             self._val_examples.add(
                 dataset=datasets[index] if index < len(datasets) else "unknown",
-                language=(langs or ["unknown"] * bs)[index],
+                language=langs[index],
                 reference=texts[index],
                 hypothesis=pred_texts[index],
                 audio=audio[index, : int(audio_lengths[index].item())],
             )
 
-        return {"wer": m["wer/overall"], "cer": m["cer/overall"]}
-
     def on_validation_epoch_start(self) -> None:
+        self._val_texts_pred.clear()
+        self._val_texts_ref.clear()
+        self._val_langs.clear()
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
+        if not self._val_texts_ref:
+            self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
+        else:
+            metrics = wer_cer_by_lang_with_mer(
+                self._val_texts_ref, self._val_texts_pred, self._val_langs
+            )
+            for name, value in metrics.items():
+                self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
+
         log_wandb_worst_val_examples(
             self.logger,
             self._val_examples.worst_first(),

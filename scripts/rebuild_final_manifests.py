@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import shutil
 import sys
-from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +23,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from prepare_data.buckets import UnderdeliveryPolicy, group_by_name  # noqa: E402
 from prepare_data.config import AppConfig, DatasetSpec  # noqa: E402
+from prepare_data.overlap import (  # noqa: E402
+    assert_no_overlap,
+    assert_val_has_no_train_bucket_names,
+    entry_key,
+    manifest_stats,
+    read_jsonl,
+)
 from prepare_data.pipeline import (  # noqa: E402
     _build_final_from_buckets,
     build_train_final_from_buckets,
@@ -55,28 +61,6 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    rows: list[dict] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows
-
-
-def _entry_key(row: dict) -> str:
-    uid = row.get("uid")
-    if isinstance(uid, str) and uid:
-        return uid
-    audio_path = row.get("audio_filepath")
-    if isinstance(audio_path, str) and audio_path:
-        return audio_path
-    raise ValueError(f"Manifest row missing uid/audio_filepath: {row}")
-
-
 def split_mixed_noisy_val_bucket(individual_dir: Path) -> None:
     """Move CV15 validation rows out of bigos_pl_noisy_val into their own bucket."""
     noisy_path = individual_dir / "bigos_pl_noisy_val.jsonl"
@@ -85,7 +69,7 @@ def split_mixed_noisy_val_bucket(individual_dir: Path) -> None:
         logger.warning("Missing {}, skipping noisy-val split", noisy_path)
         return
 
-    rows = _read_jsonl(noisy_path)
+    rows = read_jsonl(noisy_path)
     spont_rows: list[dict] = []
     cv15_rows: list[dict] = []
 
@@ -105,11 +89,11 @@ def split_mixed_noisy_val_bucket(individual_dir: Path) -> None:
         return
 
     _write_jsonl(noisy_path, spont_rows)
-    existing_cv15 = _read_jsonl(cv15_path)
+    existing_cv15 = read_jsonl(cv15_path)
     merged_cv15 = existing_cv15 + cv15_rows
     deduped: dict[str, dict] = {}
     for row in merged_cv15:
-        deduped[_entry_key(row)] = row
+        deduped[entry_key(row)] = row
     _write_jsonl(cv15_path, list(deduped.values()))
 
     logger.info(
@@ -127,32 +111,6 @@ def _backup(path: Path, backup_dir: Path) -> None:
     backup_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(path, backup_dir / path.name)
     logger.info("Backed up {} -> {}", path, backup_dir / path.name)
-
-
-def _manifest_stats(path: Path) -> dict[str, Counter[str]]:
-    langs: Counter[str] = Counter()
-    datasets: Counter[str] = Counter()
-    with path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            row = json.loads(line)
-            langs[str(row.get("language", "unknown"))] += 1
-            datasets[str(row.get("dataset", "unknown"))] += 1
-    return {"language": langs, "dataset": datasets}
-
-
-def _assert_no_overlap(train_path: Path, val_path: Path) -> None:
-    train_keys = {_entry_key(row) for row in _read_jsonl(train_path)}
-    val_keys = {_entry_key(row) for row in _read_jsonl(val_path)}
-    overlap = train_keys & val_keys
-    if overlap:
-        raise RuntimeError(f"Train/val overlap detected: {len(overlap)} shared utterances")
-
-
-def _assert_val_has_no_train_bucket_names(val_path: Path, train_bucket_names: set[str]) -> None:
-    stats = _manifest_stats(val_path)
-    bad = {name: count for name, count in stats["dataset"].items() if name in train_bucket_names}
-    if bad:
-        raise RuntimeError(f"Val manifest contains train bucket names: {bad}")
 
 
 @dataclass
@@ -189,8 +147,8 @@ def main(cfg: RebuildConfig) -> None:
     )
 
     train_bucket_names = set(group_by_name(app_config.datasets.train))
-    _assert_no_overlap(train_out, val_out)
-    _assert_val_has_no_train_bucket_names(val_out, train_bucket_names)
+    assert_no_overlap(train_out, val_out)
+    assert_val_has_no_train_bucket_names(val_out, train_bucket_names)
 
     from fix_manifest_durations import fix_manifest
 
@@ -199,7 +157,7 @@ def main(cfg: RebuildConfig) -> None:
         logger.info("Fixed durations in {}: {}", path.name, stats)
 
     for label, path in [("train", train_out), ("val", val_out)]:
-        stats = _manifest_stats(path)
+        stats = manifest_stats(path)
         total = sum(stats["language"].values())
         logger.info("[{}] {} utterances", label, total)
         logger.info("[{}] languages: {}", label, dict(stats["language"]))

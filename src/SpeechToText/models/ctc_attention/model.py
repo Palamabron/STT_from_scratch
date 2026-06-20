@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from SpeechToText.models.common.aux_layers import resolve_aux_layer_indices
 from SpeechToText.models.conformer import FastConformerEncoder, FastConformerEncoderConfig
 from SpeechToText.models.typing import CTCAttnOutput
 
@@ -26,7 +27,8 @@ class FastConformerCTCAttentionConfig:
     """Model configuration for the CTC + attention hybrid."""
 
     encoder: FastConformerEncoderConfig = field(default_factory=FastConformerEncoderConfig)
-    aux_interval: int = 4
+    aux_interval: int = 0
+    aux_layer: int | None = None
     decoder: AttentionDecoderConfig = field(default_factory=AttentionDecoderConfig)
 
 
@@ -54,11 +56,11 @@ class FastConformerCTCAttention(nn.Module):
         self.encoder = FastConformerEncoder(cfg.encoder)
         self.ctc_proj = nn.Linear(cfg.encoder.d_model, self.vocab_size)
 
-        self.aux_layers: list[int] = []
-        if cfg.aux_interval > 0:
-            for layer_index in range(cfg.encoder.n_layers - 1):
-                if (layer_index + 1) % cfg.aux_interval == 0:
-                    self.aux_layers.append(layer_index)
+        self.aux_layers: list[int] = resolve_aux_layer_indices(
+            n_layers=cfg.encoder.n_layers,
+            aux_interval=cfg.aux_interval,
+            aux_layer=cfg.aux_layer,
+        )
 
         self.aux_projs = nn.ModuleList(
             [nn.Linear(cfg.encoder.d_model, self.vocab_size) for _ in self.aux_layers]

@@ -7,11 +7,13 @@ from typing import Any, cast
 import lightning.pytorch as pl
 import tyro
 from dotenv import load_dotenv
-from lightning.pytorch.loggers import WandbLogger
 
+from SpeechToText.augmentation import DEFAULT_NOISE_BANK_PATH, DEFAULT_RIR_BANK_PATH
 from SpeechToText.dataset import create_dataloaders
 from SpeechToText.models.common.config import BaseOptimizerConfig, BaseTrainConfig
 from SpeechToText.models.common.train_factory import (
+    apply_ctc_augment_banks,
+    build_training_logger,
     configure_matmul_precision,
     run_training,
     wire_data_filter_from_model,
@@ -24,18 +26,25 @@ load_dotenv()
 
 @dataclass
 class TrainConfig(BaseTrainConfig):
-    checkpoint_dir: str = "./checkpoints/tdt"
+    checkpoint_dir: str = "./checkpoints/rnnt"
+    musan_path: str | None = DEFAULT_NOISE_BANK_PATH
+    rirs_path: str | None = DEFAULT_RIR_BANK_PATH
 
     model: FastConformerTDTConfig = field(default_factory=FastConformerTDTConfig)
     optimizer: BaseOptimizerConfig = field(default_factory=BaseOptimizerConfig)
 
     blank_id: int = 0
-    rnnt_clamp: float = 1.0
-    fused_log_softmax: bool = False
-    val_max_symbols_per_t: int = 4
+    rnnt_clamp: float = -1.0
+    fused_log_softmax: bool = True
+    compute_eval_loss: bool = False
+    val_max_symbols_per_t: int = 10
+    joint_fused_batch_size: int | None = 4
     label_smoothing: float = 0.1
+    use_tdt: bool = False
+    tdt_sigma: float = 0.05
+    tdt_omega: float = 0.1
 
-    wandb_project: str = os.getenv("WANDB_PROJECT", "multilingual_asr_tdt")
+    wandb_project: str = os.getenv("WANDB_PROJECT", "multilingual_asr_rnnt")
 
 
 def main(config: TrainConfig) -> None:
@@ -54,14 +63,19 @@ def main(config: TrainConfig) -> None:
     model_config.blank_id = int(config.blank_id)
     model_config.decoder.vocab_size = vocab_size
     model_config.joint.vocab_size = vocab_size
+    model_config.joint.use_tdt = bool(config.use_tdt)
     model_config.decoder.d_model = int(model_config.encoder.d_model)
     model_config.joint.enc_d = int(model_config.encoder.d_model)
     model_config.joint.pred_d = int(model_config.encoder.d_model)
+    model_config.joint_fused_batch_size = config.joint_fused_batch_size
 
-    lit = LitFastConformerTDT(config, sp=sp, vocab_size=vocab_size)
-
-    wandb_logger = WandbLogger(
-        project=config.wandb_project, name=config.wandb_run_name, log_model=False
+    noise_bank, rir_bank = apply_ctc_augment_banks(config)
+    lit = LitFastConformerTDT(
+        config,
+        sp=sp,
+        vocab_size=vocab_size,
+        rir_bank=rir_bank,
+        noise_bank=noise_bank,
     )
 
     run_training(
@@ -69,7 +83,7 @@ def main(config: TrainConfig) -> None:
         model=lit,
         train_loader=train_loader,
         val_loader=val_loader,
-        logger=wandb_logger,
+        logger=build_training_logger(config),
         checkpoint_dir=config.checkpoint_dir,
     )
 
