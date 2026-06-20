@@ -435,9 +435,21 @@ class DurationBatchSampler(Sampler[list[int]]):
         indices = torch.randperm(self._num_samples, generator=generator).tolist()
         yield from self._yield_batches(indices)
 
+    def _count_batches(self, indices: list[int]) -> int:
+        return sum(1 for _ in self._yield_batches(indices))
+
     def __len__(self) -> int:
-        total_duration = sum(self.durations)
-        return max(1, int(total_duration / self.max_batch_duration))
+        if self.stratify_by_language and self.languages is not None:
+            by_lang: dict[str, list[int]] = {}
+            for index in range(self._num_samples):
+                language = self.languages[index]
+                by_lang.setdefault(language, []).append(index)
+            return max(
+                1, sum(self._count_batches(lang_indices) for lang_indices in by_lang.values())
+            )
+
+        indices = list(range(self._num_samples))
+        return max(1, self._count_batches(indices))
 
 
 def _worker_init_fn(worker_id: int) -> None:

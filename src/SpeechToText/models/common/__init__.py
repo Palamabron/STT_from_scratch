@@ -3,7 +3,7 @@ from .config import BaseOptimizerConfig, BaseTrainConfig, PrecisionType
 from .decode_ctc import ctc_ids_to_texts_spm, greedy_ctc_decode
 from .examples_buffer import ExamplesBuffer
 from .losses import ctc_loss_with_label_smoothing
-from .metrics import mixed_error_rate, wer_cer_by_lang, wer_cer_by_lang_with_mer
+from .metrics import wer_cer_by_lang, wer_cer_by_lang_with_mer
 from .optimizers import build_noam_lambda_lr
 
 __all__ = [
@@ -15,7 +15,6 @@ __all__ = [
     "ctc_ids_to_texts_spm",
     "wer_cer_by_lang",
     "wer_cer_by_lang_with_mer",
-    "mixed_error_rate",
     "ctc_loss_with_label_smoothing",
     "ExamplesBuffer",
     "build_noam_lambda_lr",

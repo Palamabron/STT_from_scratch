@@ -76,6 +76,7 @@ smoke-train:
 		--precision 32-true \
 		--musan_path "" \
 		--rirs_path "" \
+		--no-use-wandb \
 		--wandb_run_name debug-overfit-one
 
 types:
@@ -131,8 +132,7 @@ train-rnnt-4090:
 		--model.encoder.n_heads 8 \
 		--data.loader.train_max_batch_duration 1200 \
 		--rnnt_clamp -1.0 \
-		--fused_log_softmax true \
-		--compute_eval_loss false \
+		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
 		--joint_fused_batch_size 4 \
 		--spec_augment_start_epoch 16 \
@@ -151,8 +151,7 @@ train-rnnt-4090-oom:
 		--model.encoder.n_heads 8 \
 		--data.loader.train_max_batch_duration 800 \
 		--rnnt_clamp -1.0 \
-		--fused_log_softmax true \
-		--compute_eval_loss false \
+		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
 		--joint_fused_batch_size 2 \
 		--wandb_run_name rnnt-4090-oom
@@ -197,7 +196,7 @@ train-tdt-4090:
 		--precision bf16-mixed \
 		--max_epochs 100 \
 		--checkpoint_dir checkpoints/tdt_4090 \
-		--use_tdt true \
+		--use-tdt \
 		--tdt_sigma 0.05 \
 		--tdt_omega 0.1 \
 		--model.encoder.d_model 384 \
@@ -205,7 +204,7 @@ train-tdt-4090:
 		--model.encoder.n_heads 8 \
 		--data.loader.train_max_batch_duration 1200 \
 		--rnnt_clamp -1.0 \
-		--compute_eval_loss false \
+		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
 		--joint_fused_batch_size 4 \
 		--wandb_run_name tdt-4090
@@ -263,7 +262,7 @@ ablate-rnnt-clamp:
 		--max_epochs 5 \
 		--checkpoint_dir checkpoints/ablate_rnnt_clamp_pos \
 		--rnnt_clamp 1.0 \
-		--compute_eval_loss false \
+		--no-compute-eval-loss \
 		--data.loader.train_max_batch_duration 800 \
 		--wandb_run_name ablate-rnnt-clamp-1.0
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.tdt.train \
@@ -272,6 +271,6 @@ ablate-rnnt-clamp:
 		--max_epochs 5 \
 		--checkpoint_dir checkpoints/ablate_rnnt_clamp_neg \
 		--rnnt_clamp -1.0 \
-		--compute_eval_loss false \
+		--no-compute-eval-loss \
 		--data.loader.train_max_batch_duration 800 \
 		--wandb_run_name ablate-rnnt-clamp--1.0

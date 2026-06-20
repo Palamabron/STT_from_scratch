@@ -3,15 +3,17 @@ from __future__ import annotations
 from typing import Literal, cast
 
 import torch
-import torch.nn.functional as F
 from sentencepiece import SentencePieceProcessor
+
+from SpeechToText.models.common.checkpoint_io import load_lightning_checkpoint
+from SpeechToText.models.common.rnnt import transducer_greedy_decode_one
 
 ModelType = Literal["auto", "ctc", "ctc_attention", "tdt"]
 
 
 def detect_model_type(checkpoint_path: str) -> ModelType:
     """Infer model head from Lightning checkpoint state-dict keys."""
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    ckpt = load_lightning_checkpoint(checkpoint_path)
     state = ckpt.get("state_dict", ckpt)
     keys = state.keys() if hasattr(state, "keys") else []
 
@@ -43,36 +45,35 @@ def load_lit_module(
     model_type: ModelType = "auto",
 ) -> tuple[torch.nn.Module, ModelType]:
     """Load a Lightning module from checkpoint for inference."""
+    ckpt = load_lightning_checkpoint(checkpoint_path)
+    config = ckpt.get("hyper_parameters", {}).get("config")
+    if config is None:
+        raise ValueError(f"Checkpoint missing hyper_parameters.config: {checkpoint_path}")
+
+    state_dict = ckpt.get("state_dict")
+    if state_dict is None:
+        raise ValueError(f"Checkpoint missing state_dict: {checkpoint_path}")
+
     resolved = resolve_model_type(checkpoint_path, model_type)
+    vocab_size = int(sp.get_piece_size()) + 1
 
     module: torch.nn.Module
     if resolved == "ctc":
         from SpeechToText.models.ctc.lit import LitFastConformerCTC
 
-        module = LitFastConformerCTC.load_from_checkpoint(
-            checkpoint_path,
-            sp=sp,
-            weights_only=False,
-        )
+        module = LitFastConformerCTC(config, sp=sp)
     elif resolved == "ctc_attention":
         from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
 
-        module = LitFastConformerCTCAttention.load_from_checkpoint(
-            checkpoint_path,
-            sp=sp,
-            weights_only=False,
-        )
+        module = LitFastConformerCTCAttention(config, sp=sp)
     elif resolved == "tdt":
         from SpeechToText.models.tdt.lit import LitFastConformerTDT
 
-        module = LitFastConformerTDT.load_from_checkpoint(
-            checkpoint_path,
-            sp=sp,
-            weights_only=False,
-        )
+        module = LitFastConformerTDT(config, sp=sp, vocab_size=vocab_size)
     else:
         raise ValueError(f"Unsupported model type: {resolved}")
 
+    module.load_state_dict(state_dict, strict=True)
     return module, resolved
 
 
@@ -115,52 +116,50 @@ def forward_ctc_log_probs(
 
 
 @torch.inference_mode()
-def forward_tdt_joint(
+def encode_transducer(
     module: torch.nn.Module,
     audio: torch.Tensor,
     audio_lengths: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-    """Run RNN-T/TDT encoder + joint network for greedy decoding."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the transducer encoder and return encoder outputs with lengths."""
     from SpeechToText.models.tdt.lit import LitFastConformerTDT
 
     lit = cast(LitFastConformerTDT, module)
     feats, feat_lens = lit.featurizer(audio, audio_lengths)
     enc, out_lengths = lit.net.encoder(feats, feat_lens)
-
-    batch_size = int(enc.size(0))
-    u_max = max(1, int(out_lengths.max().item()))
-    dec_in = torch.full(
-        (batch_size, u_max + 1),
-        lit.blank_id,
-        dtype=torch.long,
-        device=enc.device,
-    )
-    dec = lit.net.decoder(dec_in)
-    joint_out = lit.net.joint.forward_chunked(
-        enc,
-        dec,
-        fused_batch_size=lit.config.joint_fused_batch_size,
-    )
-
-    if isinstance(joint_out, tuple):
-        token_logits, duration_logits = joint_out
-        return (
-            F.log_softmax(token_logits, dim=-1),
-            F.log_softmax(duration_logits, dim=-1),
-            out_lengths,
-        )
-
-    return F.log_softmax(joint_out, dim=-1), None, out_lengths
+    return enc, out_lengths
 
 
-def forward_tdt_log_probs(
+@torch.inference_mode()
+def transducer_greedy_decode_batch(
     module: torch.nn.Module,
     audio: torch.Tensor,
     audio_lengths: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward-compatible wrapper returning token log-probs only."""
-    token_log_probs, _, out_lengths = forward_tdt_joint(module, audio, audio_lengths)
-    return token_log_probs, out_lengths
+    *,
+    blank_id: int = 0,
+    val_max_symbols_per_t: int = 10,
+) -> list[list[int]]:
+    """Greedy RNN-T/TDT decode with incremental predictor history."""
+    from SpeechToText.models.tdt.lit import LitFastConformerTDT
+
+    lit = cast(LitFastConformerTDT, module)
+    enc, out_lengths = encode_transducer(module, audio, audio_lengths)
+    use_tdt = module_uses_tdt(module)
+
+    decoded: list[list[int]] = []
+    for index in range(int(enc.size(0))):
+        out_len = int(out_lengths[index].item())
+        ids = transducer_greedy_decode_one(
+            enc[index : index + 1],
+            out_len,
+            decoder=lit.net.decoder,
+            joint=lit.net.joint,
+            blank_id=blank_id,
+            max_symbols_per_t=val_max_symbols_per_t,
+            use_tdt=use_tdt,
+        )
+        decoded.append(ids)
+    return decoded
 
 
 @torch.inference_mode()
@@ -172,37 +171,21 @@ def transcribe_batch(
     sp: SentencePieceProcessor,
     model_type: ModelType,
     blank_id: int = 0,
-    val_max_symbols_per_t: int = 4,
+    val_max_symbols_per_t: int = 10,
 ) -> list[str]:
     """Decode a batch of waveforms into text transcripts."""
     from SpeechToText.models.common import ctc_ids_to_texts_spm, greedy_ctc_decode
-    from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, greedy_tdt_decode_one
-
-    batch_size = int(audio.size(0))
 
     if model_type == "tdt":
-        token_log_probs, duration_log_probs, out_lengths = forward_tdt_joint(
-            module, audio, audio_lengths
+        decoded = transducer_greedy_decode_batch(
+            module,
+            audio,
+            audio_lengths,
+            blank_id=blank_id,
+            val_max_symbols_per_t=val_max_symbols_per_t,
         )
-        use_tdt = duration_log_probs is not None and module_uses_tdt(module)
         texts: list[str] = []
-        for index in range(batch_size):
-            out_len = int(out_lengths[index].item())
-            if use_tdt and duration_log_probs is not None:
-                ids = greedy_tdt_decode_one(
-                    token_log_probs[index : index + 1],
-                    duration_log_probs[index : index + 1],
-                    out_length=out_len,
-                    max_symbols_per_t=val_max_symbols_per_t,
-                    blank_id=blank_id,
-                )
-            else:
-                ids = greedy_rnnt_path_decode_one(
-                    token_log_probs[index : index + 1],
-                    out_length=out_len,
-                    max_symbols_per_t=val_max_symbols_per_t,
-                    blank_id=blank_id,
-                )
+        for ids in decoded:
             sp_ids = [token_id - 1 for token_id in ids if token_id != blank_id and token_id > 0]
             texts.append("" if not sp_ids else sp.decode_ids(sp_ids))
         return texts

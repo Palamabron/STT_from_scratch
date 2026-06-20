@@ -8,6 +8,8 @@ import torch
 import tyro
 from loguru import logger
 
+from checkpoint_utils import load_lightning_checkpoint
+
 _EPOCH_RE = re.compile(r"epoch=(\d+)")
 
 
@@ -95,7 +97,7 @@ def main(cfg: AverageCheckpointsConfig) -> None:
     state_dicts: list[dict[str, torch.Tensor]] = []
     template: dict | None = None
     for _, path in selected:
-        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        ckpt = load_lightning_checkpoint(path)
         if template is None:
             template = ckpt
         state_dicts.append(ckpt["state_dict"])

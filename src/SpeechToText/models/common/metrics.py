@@ -44,17 +44,10 @@ def wer_cer_by_lang(
     return out
 
 
-def mixed_error_rate(refs: list[str], hyps: list[str]) -> float:
-    """Mixed Error Rate (MER) for code-switched or multilingual evaluation."""
-    wer, _ = wer_cer(refs, hyps)
-    return wer
-
-
 def wer_cer_by_lang_with_mer(
     refs: list[str],
     hyps: list[str],
     langs: list[str] | None,
 ) -> dict[str, float]:
-    out = wer_cer_by_lang(refs, hyps, langs)
-    out["mer/overall"] = mixed_error_rate(refs, hyps)
-    return out
+    """Return per-language WER/CER metrics for validation logging."""
+    return wer_cer_by_lang(refs, hyps, langs)

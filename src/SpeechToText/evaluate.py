@@ -20,11 +20,9 @@ from SpeechToText.dataset import DataConfig, FeatureConfig, ManifestPaths
 from SpeechToText.models.common.inference import (
     ModelType,
     forward_ctc_log_probs,
-    forward_tdt_joint,
     load_lit_module,
-    module_uses_tdt,
+    transducer_greedy_decode_batch,
 )
-from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, greedy_tdt_decode_one
 from SpeechToText.utils.decoding import (
     collect_probs_for_beam,
     compute_wer_cer,
@@ -56,7 +54,7 @@ class EvaluateConfig:
     batch_size: int = 64
     num_workers: int | None = None
     model_type: ModelType = "auto"
-    val_max_symbols_per_t: int = 4
+    val_max_symbols_per_t: int = 10
 
 
 def load_manifest(path: str) -> list[dict[str, Any]]:
@@ -167,27 +165,14 @@ def process_audio_batch(
 
     if model_type == "tdt":
         with torch.inference_mode():
-            token_log_probs, duration_log_probs, batch_out_lengths = forward_tdt_joint(
-                model, padded_audio, lengths_tensor
+            decoded = transducer_greedy_decode_batch(
+                model,
+                padded_audio,
+                lengths_tensor,
+                blank_id=blank_id,
+                val_max_symbols_per_t=config.val_max_symbols_per_t,
             )
-        use_tdt = duration_log_probs is not None and module_uses_tdt(model)
-        for index in range(token_log_probs.size(0)):
-            out_len = int(batch_out_lengths[index].item())
-            if use_tdt and duration_log_probs is not None:
-                ids = greedy_tdt_decode_one(
-                    token_log_probs[index : index + 1],
-                    duration_log_probs[index : index + 1],
-                    out_length=out_len,
-                    max_symbols_per_t=config.val_max_symbols_per_t,
-                    blank_id=blank_id,
-                )
-            else:
-                ids = greedy_rnnt_path_decode_one(
-                    token_log_probs[index : index + 1],
-                    out_length=out_len,
-                    max_symbols_per_t=config.val_max_symbols_per_t,
-                    blank_id=blank_id,
-                )
+        for index, ids in enumerate(decoded):
             sp_ids = [token_id - 1 for token_id in ids if token_id != blank_id and token_id > 0]
             hyp = "" if not sp_ids else tokenizer.decode_ids(sp_ids)
             ref = refs_batch[index]
@@ -481,4 +466,4 @@ def main(config: EvaluateConfig) -> None:
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main(tyro.cli(EvaluateConfig))

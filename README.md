@@ -56,7 +56,7 @@ WANDB_API_KEY=...        # optional
 WANDB_PROJECT=multilingual_asr
 ```
 
-Disable W&B: add `--use_wandb false` to any train command.
+Disable W&B: add `--no-use-wandb` to any train command.
 
 ---
 
@@ -195,7 +195,7 @@ Stratified language batching is on by default (`LoaderConfig.stratify_by_languag
 
 ### Step 6 — Evaluate
 
-Training logs: `val/wer/overall`, `val/wer/en`, `val/wer/pl`, `val/mer/overall`, worst examples table in W&B.
+Training logs: `val/wer/overall`, `val/wer/en`, `val/wer/pl`, worst examples table in W&B.
 
 Offline:
 
@@ -243,7 +243,7 @@ Ablation: `make ablate-kenlm-ctc` (needs trained checkpoints + KenLM file).
 uv run python -m SpeechToText.transcribe \
   --checkpoint checkpoints/ctc_4090/last.ckpt \
   --tokenizer_model "$SPM" \
-  path/to/audio.wav
+  --audio_paths path/to/audio.wav
 ```
 
 RNN-T/TDT: add `--model_type tdt --val_max_symbols_per_t 10`.
@@ -297,6 +297,6 @@ tests/                     Unit tests
 | OOM | `*-oom` Makefile target or lower `--data.loader.train_max_batch_duration` |
 | RNN-T val OOM | Keep `--compute_eval_loss false` (default) |
 | Missing `HF_TOKEN` | Set in `.env` before `make prepare-data` |
-| W&B errors | `--use_wandb false` |
+| W&B errors | `--no-use-wandb` |
 | KenLM eval fails | Build `lm/pl_5gram.arpa` separately |
 | Tokenizer mismatch | Same `--data.tokenizer_model` for train and eval |

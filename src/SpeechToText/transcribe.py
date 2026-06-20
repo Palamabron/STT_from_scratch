@@ -15,10 +15,11 @@ from SpeechToText.models.common.inference import ModelType, load_lit_module, tra
 class TranscribeConfig:
     checkpoint: str
     tokenizer_model: str
+    audio_paths: list[str]
     sample_rate: int = 16_000
     device: str = "auto"
     model_type: ModelType = "auto"
-    val_max_symbols_per_t: int = 4
+    val_max_symbols_per_t: int = 10
 
 
 def get_device(device_str: str) -> torch.device:
@@ -69,11 +70,11 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
     return transcripts
 
 
-def main(audio_paths: list[str], cfg: TranscribeConfig) -> None:
-    texts = transcribe_files(cfg, audio_paths)
-    for path, text in zip(audio_paths, texts, strict=False):
+def main(cfg: TranscribeConfig) -> None:
+    texts = transcribe_files(cfg, cfg.audio_paths)
+    for path, text in zip(cfg.audio_paths, texts, strict=False):
         logger.info("{}: {}", path, text)
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    main(tyro.cli(TranscribeConfig))

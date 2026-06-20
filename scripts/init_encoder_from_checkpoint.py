@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+import lightning.pytorch as pl
 import torch
 import tyro
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
+
+from checkpoint_utils import load_lightning_checkpoint
 
 
 @dataclass(slots=True)
@@ -27,6 +30,7 @@ def _build_target_module(
     target: Literal["rnnt", "ctc_attention"],
     *,
     sp: SentencePieceProcessor,
+    source_ckpt: dict[str, object] | None = None,
 ) -> torch.nn.Module:
     vocab_size = int(sp.get_piece_size()) + 1
 
@@ -35,15 +39,38 @@ def _build_target_module(
         from SpeechToText.models.tdt.train import TrainConfig
 
         config = TrainConfig()
+        if source_ckpt is not None:
+            source_config = source_ckpt.get("hyper_parameters", {}).get("config")
+            if source_config is not None and hasattr(source_config, "model"):
+                config.model.encoder = source_config.model.encoder
         config.model.decoder.vocab_size = vocab_size
         config.model.joint.vocab_size = vocab_size
+        config.model.decoder.d_model = int(config.model.encoder.d_model)
+        config.model.joint.enc_d = int(config.model.encoder.d_model)
+        config.model.joint.pred_d = int(config.model.encoder.d_model)
         return LitFastConformerTDT(config, sp=sp, vocab_size=vocab_size)
 
     from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
     from SpeechToText.models.ctc_attention.train import TrainConfig
 
     config = TrainConfig()
+    if source_ckpt is not None:
+        source_config = source_ckpt.get("hyper_parameters", {}).get("config")
+        if source_config is not None and hasattr(source_config, "model"):
+            config.model.encoder = source_config.model.encoder
     return LitFastConformerCTCAttention(config=config, sp=sp)
+
+
+def _save_lightning_checkpoint(module: pl.LightningModule, output_path: Path) -> None:
+    checkpoint: dict[str, Any] = {
+        "epoch": 0,
+        "global_step": 0,
+        "state_dict": module.state_dict(),
+        "hyper_parameters": {"config": module.config},
+    }
+    module.on_save_checkpoint(checkpoint)
+    checkpoint["pytorch-lightning-version"] = pl.__version__
+    torch.save(checkpoint, output_path)
 
 
 def main(cfg: InitEncoderConfig) -> None:
@@ -54,13 +81,13 @@ def main(cfg: InitEncoderConfig) -> None:
     sp = SentencePieceProcessor()
     sp.load(cfg.tokenizer_model)
 
-    source_ckpt = torch.load(source_path, map_location="cpu", weights_only=False)
+    source_ckpt = load_lightning_checkpoint(source_path)
     source_state = source_ckpt.get("state_dict", source_ckpt)
     encoder_weights = _extract_encoder_state(source_state)
     if not encoder_weights:
         raise ValueError(f"No net.encoder.* weights found in {source_path}")
 
-    target_module = _build_target_module(cfg.target, sp=sp)
+    target_module = _build_target_module(cfg.target, sp=sp, source_ckpt=source_ckpt)
     target_state = target_module.state_dict()
 
     copied = 0
@@ -86,7 +113,7 @@ def main(cfg: InitEncoderConfig) -> None:
 
     output_path = Path(cfg.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"state_dict": target_module.state_dict(), "epoch": 0}, output_path)
+    _save_lightning_checkpoint(target_module, output_path)
 
     logger.info(
         "Copied {} encoder tensors ({} skipped) from {} into {} head -> {}",

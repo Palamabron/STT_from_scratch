@@ -30,7 +30,7 @@ def build_train_final_from_buckets(
         bucket_specs=bucket_specs,
         individual_manifests_dir=individual_manifests_dir,
         output_manifest=output_manifest,
-        underdelivery_policy=UnderdeliveryPolicy.WARN,
+        underdelivery_policy=UnderdeliveryPolicy.RAISE,
     )
 
 
@@ -97,7 +97,10 @@ def validate_final_manifests(app_config: AppConfig) -> None:
     train_out = resolve_under_root(root_dir, app_config.paths.final_train_manifest)
     val_out = resolve_under_root(root_dir, app_config.paths.final_val_manifest)
     if not train_out.exists() or not val_out.exists():
-        return
+        raise FileNotFoundError(
+            "Final manifests missing; expected "
+            f"{train_out} and {val_out}. Run rebuild-manifests after prepare-data."
+        )
 
     train_bucket_names = set(group_by_name(app_config.datasets.train))
     assert_no_overlap(train_out, val_out)

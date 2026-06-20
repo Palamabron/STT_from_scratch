@@ -143,7 +143,7 @@ def main(cfg: RebuildConfig) -> None:
         bucket_specs=app_config.datasets.val,
         individual_manifests_dir=individual_dir,
         output_manifest=val_out,
-        underdelivery_policy=UnderdeliveryPolicy.WARN,
+        underdelivery_policy=UnderdeliveryPolicy.RAISE,
     )
 
     train_bucket_names = set(group_by_name(app_config.datasets.train))
