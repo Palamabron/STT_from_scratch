@@ -49,8 +49,8 @@ class LoaderConfig:
     pin_memory: bool = True
     persistent_workers: bool = True
     prefetch_factor: int = 4
-    train_max_batch_duration: float | None = 1200.0
-    train_max_batch_size: int = 1024
+    train_max_batch_duration: float | None = 240.0
+    train_max_batch_size: int = 64
     bucket_size: int = 4096
     shuffle: bool = True
     seed: int = 42

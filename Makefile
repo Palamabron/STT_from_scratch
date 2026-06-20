@@ -133,7 +133,8 @@ train-ctc-4090-sm:
 		--model.encoder.n_layers 14 \
 		--model.encoder.n_heads 6 \
 		--model.aux_layer 6 \
-		--data.loader.train_max_batch_duration 1600 \
+		--data.loader.train_max_batch_duration 300 \
+		--data.loader.train_max_batch_size 64 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
 		--spec_augment_start_epoch 16 \
