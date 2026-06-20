@@ -71,9 +71,7 @@ def test_rnnt_incremental_decode_uses_emitted_prefix() -> None:
 class _PrefixAwareTdtJoint(nn.Module):
     duration_out = object()
 
-    def forward(
-        self, enc: torch.Tensor, pred: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, enc: torch.Tensor, pred: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, time_steps, _ = enc.shape
         _, label_steps, _ = pred.shape
         token_vocab = 3

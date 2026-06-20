@@ -264,9 +264,7 @@ class LitFastConformerTDT(pl.LightningModule):
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
         else:
-            metrics = wer_cer_by_lang(
-                self._val_texts_ref, self._val_texts_pred, self._val_langs
-            )
+            metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
             for name, value in metrics.items():
                 self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
 
