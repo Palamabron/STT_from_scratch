@@ -15,7 +15,7 @@ TRAIN_PATHS := \
 .PHONY: fmt prepare-data rebuild-manifests train-tokenizer train-tokenizer-8k \
 	tokenizer-coverage test smoke-train types \
 	train-ctc-4090 train-rnnt-4090 train-ctc-attn-4090 train-tdt-4090 \
-	train-ctc-4090-oom train-rnnt-4090-oom train-ctc-attn-4090-oom \
+	train-ctc-4090-oom train-ctc-4090-sm train-rnnt-4090-oom train-ctc-attn-4090-oom \
 	init-rnnt-from-ctc average-checkpoints \
 	ablate-subsample-4x ablate-kenlm-ctc ablate-rnnt-clamp
 
@@ -94,7 +94,8 @@ train-ctc-4090:
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.aux_layer 7 \
-		--data.loader.train_max_batch_duration 1600 \
+		--data.loader.train_max_batch_duration 240 \
+		--data.loader.train_max_batch_size 64 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
 		--spec_augment_start_epoch 16 \
@@ -113,13 +114,33 @@ train-ctc-4090-oom:
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.aux_layer 7 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration 180 \
+		--data.loader.train_max_batch_size 48 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
 		--spec_augment_start_epoch 16 \
 		--audio_augment_start_epoch 7 \
 		--optimizer.lr 2e-3 \
 		--wandb_run_name ctc-4090-oom
+
+train-ctc-4090-sm:
+	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.ctc.train \
+		$(TRAIN_PATHS) \
+		--precision bf16-mixed \
+		--max_epochs 100 \
+		--checkpoint_dir checkpoints/ctc_4090_sm \
+		--model.encoder.d_model 384 \
+		--model.encoder.n_layers 14 \
+		--model.encoder.n_heads 6 \
+		--model.aux_layer 6 \
+		--data.loader.train_max_batch_duration 1600 \
+		--ctc_label_smoothing 0.1 \
+		--aux_ctc_weight 0.3 \
+		--spec_augment_start_epoch 16 \
+		--audio_augment_start_epoch 7 \
+		--optimizer.lr 2e-3 \
+		--optimizer.warmup_ratio 0.1 \
+		--wandb_run_name ctc-4090-sm
 
 train-rnnt-4090:
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.tdt.train \

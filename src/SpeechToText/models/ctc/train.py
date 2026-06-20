@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import os
-
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-
 import warnings
 
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 import tyro
+from dotenv import load_dotenv
 
 from SpeechToText.dataset import create_dataloaders
 from SpeechToText.models.common.train_factory import (
@@ -18,6 +18,8 @@ from SpeechToText.models.common.train_factory import (
 )
 from SpeechToText.models.ctc.config import TrainConfig
 from SpeechToText.models.ctc.lit import LitFastConformerCTC
+
+load_dotenv()
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
 

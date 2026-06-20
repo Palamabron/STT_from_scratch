@@ -146,7 +146,7 @@ export SPM=models/spm_unigram_4k_trainval.model
 | 4 | `make train-tdt-4090` | After stable RNN-T baseline |
 | 5 | `make train-ctc-attn-4090` | Optional |
 
-OOM fallbacks: `train-ctc-4090-oom`, `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
+OOM fallbacks: `train-ctc-4090-oom` (batch duration 1200), `train-ctc-4090-sm` (~55M params), `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
 
 Hyperparameter reference: `configs/train/*.env`.
 
