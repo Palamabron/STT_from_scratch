@@ -196,9 +196,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         )
 
         decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=self.blank_id)
-        self._val_examples.accumulate_blank_stats(
-            out.ctc_log_probs, out.out_lengths, self.blank_id
-        )
+        self._val_examples.accumulate_blank_stats(out.ctc_log_probs, out.out_lengths, self.blank_id)
         pred_texts = ctc_ids_to_texts_spm(self.sp, decoded)
 
         texts_ref = batch.get("text", [])

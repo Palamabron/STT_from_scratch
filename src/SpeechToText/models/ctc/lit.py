@@ -23,6 +23,7 @@ from SpeechToText.models.common.validation_logging import (
 )
 from SpeechToText.models.ctc.model import FastConformerCTC
 from SpeechToText.models.ctc.steps import compute_ctc_losses
+from SpeechToText.models.typing import ValBatch
 
 
 class LitFastConformerCTC(pl.LightningModule):
@@ -147,7 +148,7 @@ class LitFastConformerCTC(pl.LightningModule):
         )
         return losses.total
 
-    def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
+    def validation_step(self, batch: ValBatch, batch_idx: int) -> None:
         audio = batch["audio"]
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
@@ -170,8 +171,7 @@ class LitFastConformerCTC(pl.LightningModule):
         )
         self._val_examples.accumulate_blank_stats(log_probs_btv, ctc_in_lens, self.blank_id)
         texts_pred = ctc_ids_to_texts_spm(self.sp, greedy_preds)
-        raw_texts = batch.get("text")
-        texts_ref: list[str] = raw_texts if isinstance(raw_texts, list) else []
+        texts_ref = batch["text"]
         langs = batch.get("language", ["unknown"] * len(texts_pred))
         datasets = batch.get("dataset", ["unknown"] * len(texts_pred))
 

@@ -7,8 +7,8 @@ TRAIN_MODULE := SpeechToText.models.ctc.train
 .PHONY: fmt prepare-data rebuild-manifests train-tokenizer test smoke-train types
 
 fmt:
-	cd $(REPO_ROOT) && $(UV_DEV) ruff format src scripts
-	cd $(REPO_ROOT) && $(UV_DEV) ruff check src scripts --fix
+	cd $(REPO_ROOT) && $(UV_DEV) ruff format src scripts tests
+	cd $(REPO_ROOT) && $(UV_DEV) ruff check src scripts tests --fix
 
 prepare-data:
 	cd $(REPO_ROOT)/scripts && $(UV) python -m prepare_data --config ../configs/data.yaml

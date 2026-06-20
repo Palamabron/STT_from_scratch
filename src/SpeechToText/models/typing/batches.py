@@ -11,6 +11,7 @@ class TrainBatch(TypedDict):
     targets: Tensor
     target_length: Tensor
     language: NotRequired[list[str]]
+    dataset: NotRequired[list[str]]
 
 
 class ValBatch(TrainBatch):
