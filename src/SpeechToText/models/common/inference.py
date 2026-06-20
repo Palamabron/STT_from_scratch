@@ -77,17 +77,6 @@ def load_lit_module(
     return module, resolved
 
 
-def module_uses_tdt(module: torch.nn.Module) -> bool:
-    """Return True when the loaded module has a duration head (true TDT)."""
-    from SpeechToText.models.tdt.lit import LitFastConformerTDT
-
-    if not isinstance(module, LitFastConformerTDT):
-        return False
-    if bool(getattr(module.config, "use_tdt", False)):
-        return True
-    return getattr(module.net.joint, "duration_out", None) is not None
-
-
 @torch.inference_mode()
 def forward_ctc_log_probs(
     module: torch.nn.Module,
@@ -144,7 +133,6 @@ def transducer_greedy_decode_batch(
 
     lit = cast(LitFastConformerTDT, module)
     enc, out_lengths = encode_transducer(module, audio, audio_lengths)
-    use_tdt = module_uses_tdt(module)
 
     decoded: list[list[int]] = []
     for index in range(int(enc.size(0))):
@@ -156,7 +144,6 @@ def transducer_greedy_decode_batch(
             joint=lit.net.joint,
             blank_id=blank_id,
             max_symbols_per_t=val_max_symbols_per_t,
-            use_tdt=use_tdt,
         )
         decoded.append(ids)
     return decoded

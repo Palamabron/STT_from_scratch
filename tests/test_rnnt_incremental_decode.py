@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from SpeechToText.models.common.rnnt import (
     greedy_rnnt_decode_incremental,
-    greedy_rnnt_path_decode_one,
+    greedy_tdt_decode_incremental,
 )
 
 
@@ -49,14 +49,14 @@ class _PrefixAwareJoint(nn.Module):
         return logits
 
 
-def test_incremental_decode_uses_emitted_prefix() -> None:
+def test_rnnt_incremental_decode_uses_emitted_prefix() -> None:
     decoder = _PrefixAwareDecoder()
     joint = _PrefixAwareJoint()
     enc = torch.zeros(1, 3, 4)
     for time_index in range(3):
         enc[0, time_index, 0] = float(time_index)
 
-    incremental = greedy_rnnt_decode_incremental(
+    decoded = greedy_rnnt_decode_incremental(
         enc,
         out_length=3,
         decoder=decoder,  # type: ignore[arg-type]
@@ -65,19 +65,62 @@ def test_incremental_decode_uses_emitted_prefix() -> None:
         max_symbols_per_t=2,
     )
 
-    static_lattice = torch.full((1, 3, 3, 3), -10.0)
-    static_lattice[..., 0] = 0.0
-    static_lattice[0, 0, 0, 1] = 5.0
-    static_lattice[0, 0, 0, 0] = -10.0
-    static_lattice[0, 1, 0, 1] = 5.0
-    static_lattice[0, 1, 0, 0] = -10.0
-    static_lattice[:, :, 1, :] = static_lattice[:, :, 0, :]
-    static = greedy_rnnt_path_decode_one(
-        torch.log_softmax(static_lattice, dim=-1),
-        out_length=3,
-        max_symbols_per_t=2,
+    assert decoded == [1, 2]
+
+
+class _PrefixAwareTdtJoint(nn.Module):
+    duration_out = object()
+
+    def forward(
+        self, enc: torch.Tensor, pred: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, time_steps, _ = enc.shape
+        _, label_steps, _ = pred.shape
+        token_vocab = 3
+        duration_classes = 3
+        token_logits = torch.full(
+            (batch_size, time_steps, label_steps, token_vocab), -10.0, device=enc.device
+        )
+        duration_logits = torch.full(
+            (batch_size, time_steps, label_steps, duration_classes), -10.0, device=enc.device
+        )
+        token_logits[..., 0] = 0.0
+
+        for time_index in range(time_steps):
+            for label_index in range(label_steps):
+                time_value = int(enc[0, time_index, 0].item())
+                label_value = int(pred[0, label_index, 0].item())
+                prefix_token = int(pred[0, label_index, 1].item())
+
+                if time_value == 0 and label_value == 0:
+                    token_logits[0, time_index, label_index, 1] = 5.0
+                    token_logits[0, time_index, label_index, 0] = -10.0
+                    duration_logits[0, time_index, label_index, 2] = 5.0
+                elif time_value == 3 and label_value == 0:
+                    token_logits[0, time_index, label_index, 1] = 5.0
+                    token_logits[0, time_index, label_index, 0] = -10.0
+                    duration_logits[0, time_index, label_index, 0] = 5.0
+                elif time_value == 3 and label_value == 1 and prefix_token == 1:
+                    token_logits[0, time_index, label_index, 2] = 5.0
+                    token_logits[0, time_index, label_index, 0] = -10.0
+                    duration_logits[0, time_index, label_index, 0] = 5.0
+        return token_logits, duration_logits
+
+
+def test_tdt_incremental_decode_uses_emitted_prefix_and_duration() -> None:
+    decoder = _PrefixAwareDecoder()
+    joint = _PrefixAwareTdtJoint()
+    enc = torch.zeros(1, 6, 4)
+    enc[0, 0, 0] = 0.0
+    enc[0, 3, 0] = 3.0
+
+    decoded = greedy_tdt_decode_incremental(
+        enc,
+        out_length=6,
+        decoder=decoder,  # type: ignore[arg-type]
+        joint=joint,  # type: ignore[arg-type]
         blank_id=0,
+        max_symbols_per_t=2,
     )
 
-    assert incremental == [1, 2]
-    assert static == [1, 1]
+    assert decoded == [1, 2]

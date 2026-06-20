@@ -8,7 +8,7 @@ import torch
 import tyro
 from loguru import logger
 
-from checkpoint_utils import load_lightning_checkpoint
+from SpeechToText.models.common.checkpoint_io import load_lightning_checkpoint
 
 _EPOCH_RE = re.compile(r"epoch=(\d+)")
 

@@ -42,12 +42,3 @@ def wer_cer_by_lang(
         out["cer/pl"] = c
 
     return out
-
-
-def wer_cer_by_lang_with_mer(
-    refs: list[str],
-    hyps: list[str],
-    langs: list[str] | None,
-) -> dict[str, float]:
-    """Return per-language WER/CER metrics for validation logging."""
-    return wer_cer_by_lang(refs, hyps, langs)

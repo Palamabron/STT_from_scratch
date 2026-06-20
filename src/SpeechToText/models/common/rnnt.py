@@ -30,67 +30,6 @@ def targets_1d_to_padded_2d(
     return out
 
 
-def greedy_rnnt_path_decode_one(
-    log_probs: torch.Tensor,
-    out_length: int,
-    max_symbols_per_t: int,
-    blank_id: int,
-) -> list[int]:
-    t = 0
-    u = 0
-    emitted: list[int] = []
-    max_u = int(log_probs.size(2))
-
-    while t < out_length and u < max_u:
-        n_emit = 0
-        while n_emit < max_symbols_per_t and u < max_u:
-            p = log_probs[0, t, u]
-            k = int(torch.argmax(p).item())
-            if k == blank_id:
-                break
-            emitted.append(k)
-            u += 1
-            n_emit += 1
-        t += 1
-
-    return emitted
-
-
-def greedy_tdt_decode_one(
-    token_log_probs: torch.Tensor,
-    duration_log_probs: torch.Tensor,
-    out_length: int,
-    max_symbols_per_t: int,
-    blank_id: int,
-) -> list[int]:
-    """Greedy TDT decode with frame-skipping from predicted durations."""
-    t = 0
-    u = 0
-    emitted: list[int] = []
-    max_u = int(token_log_probs.size(2))
-
-    while t < out_length and u < max_u:
-        n_emit = 0
-        while n_emit < max_symbols_per_t and u < max_u and t < out_length:
-            token_p = token_log_probs[0, t, u]
-            token_id = int(torch.argmax(token_p).item())
-            if token_id == blank_id:
-                dur_logits = duration_log_probs[0, t, u]
-                duration = int(torch.argmax(dur_logits).item())
-                t += max(1, duration + 1)
-                break
-            emitted.append(token_id)
-            u += 1
-            n_emit += 1
-            dur_logits = duration_log_probs[0, t, u - 1]
-            duration = int(torch.argmax(dur_logits).item())
-            t += max(1, duration + 1)
-        if n_emit == 0 and t < out_length:
-            t += 1
-
-    return emitted
-
-
 def _joint_step_log_probs(
     joint: JointNet,
     enc_t: torch.Tensor,
@@ -213,10 +152,9 @@ def transducer_greedy_decode_one(
     joint: JointNet,
     blank_id: int,
     max_symbols_per_t: int,
-    use_tdt: bool,
 ) -> list[int]:
-    """Dispatch greedy transducer decode with correct incremental predictor context."""
-    if use_tdt and joint.duration_out is not None:
+    """Greedy transducer decode with incremental predictor history."""
+    if joint.duration_out is not None:
         return greedy_tdt_decode_incremental(
             enc,
             out_length,

@@ -15,7 +15,7 @@ from SpeechToText.models.common import (
     ExamplesBuffer,
     ctc_ids_to_texts_spm,
     greedy_ctc_decode,
-    wer_cer_by_lang_with_mer,
+    wer_cer_by_lang,
 )
 from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
 from SpeechToText.models.common.optimizers import configure_adamw_noam
@@ -243,7 +243,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
         else:
-            metrics = wer_cer_by_lang_with_mer(
+            metrics = wer_cer_by_lang(
                 self._val_texts_ref, self._val_texts_pred, self._val_langs
             )
             for name, value in metrics.items():

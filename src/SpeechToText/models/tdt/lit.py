@@ -10,7 +10,7 @@ from sentencepiece import SentencePieceProcessor
 
 from SpeechToText.augmentation import GPUAudioAugmentation, SpecAugment
 from SpeechToText.features import WaveformFeaturizer
-from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang_with_mer
+from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang
 from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
 from SpeechToText.models.common.optimizers import configure_adamw_noam
 from SpeechToText.models.common.rnnt import transducer_greedy_decode_one
@@ -23,7 +23,7 @@ from SpeechToText.models.tdt.model import FastConformerTDT
 from SpeechToText.models.typing import TDTOutput, TrainBatch, ValBatch
 
 if TYPE_CHECKING:
-    from SpeechToText.models.tdt.train import TrainConfig
+    from SpeechToText.models.tdt.config import TrainConfig
 
 
 class LitFastConformerTDT(pl.LightningModule):
@@ -202,7 +202,6 @@ class LitFastConformerTDT(pl.LightningModule):
             joint=self.net.joint,
             blank_id=self.blank_id,
             max_symbols_per_t=int(self.config.val_max_symbols_per_t),
-            use_tdt=bool(self.config.use_tdt),
         )
 
     def validation_step(self, batch: ValBatch, batch_idx: int) -> None:
@@ -265,7 +264,7 @@ class LitFastConformerTDT(pl.LightningModule):
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
         else:
-            metrics = wer_cer_by_lang_with_mer(
+            metrics = wer_cer_by_lang(
                 self._val_texts_ref, self._val_texts_pred, self._val_langs
             )
             for name, value in metrics.items():

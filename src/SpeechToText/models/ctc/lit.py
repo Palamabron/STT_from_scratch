@@ -207,13 +207,13 @@ class LitFastConformerCTC(pl.LightningModule):
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
-        from SpeechToText.models.common import wer_cer_by_lang_with_mer
+        from SpeechToText.models.common import wer_cer_by_lang
 
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
             return
 
-        metrics = wer_cer_by_lang_with_mer(
+        metrics = wer_cer_by_lang(
             self._val_texts_ref, self._val_texts_pred, self._val_langs
         )
 

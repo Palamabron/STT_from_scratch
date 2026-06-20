@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import torch
 
-from SpeechToText.models.common.rnnt import (
-    greedy_rnnt_path_decode_one,
-    greedy_tdt_decode_one,
-    rnnt_loss_mean,
-)
+from SpeechToText.models.common.rnnt import rnnt_loss_mean
 from SpeechToText.models.tdt.loss import _sigma_penalty, compute_tdt_losses
 
 
@@ -92,32 +88,3 @@ def test_sigma_penalty_increases_when_mass_below_one() -> None:
     normalized = torch.log(torch.tensor([[[[0.25, 0.25, 0.25, 0.25]]]]))
     high_mass = _sigma_penalty(normalized, out_lengths, target_lengths)
     assert low_mass.item() < high_mass.item()
-
-
-def test_greedy_tdt_decode_skips_frames() -> None:
-    blank_id = 0
-    token_log_probs = torch.full((1, 5, 3, 4), -5.0)
-    duration_log_probs = torch.full((1, 5, 3, 5), -5.0)
-
-    token_log_probs[0, 0, 0, 1] = 2.0
-    duration_log_probs[0, 0, 0, 2] = 2.0
-
-    token_log_probs[0, 3, 1, 2] = 2.0
-    duration_log_probs[0, 3, 1, 0] = 2.0
-
-    rnnt_ids = greedy_rnnt_path_decode_one(
-        torch.log_softmax(token_log_probs, dim=-1),
-        out_length=5,
-        max_symbols_per_t=10,
-        blank_id=blank_id,
-    )
-    tdt_ids = greedy_tdt_decode_one(
-        torch.log_softmax(token_log_probs, dim=-1),
-        torch.log_softmax(duration_log_probs, dim=-1),
-        out_length=5,
-        max_symbols_per_t=10,
-        blank_id=blank_id,
-    )
-
-    assert rnnt_ids == [1, 2]
-    assert tdt_ids == [1, 2]

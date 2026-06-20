@@ -10,7 +10,7 @@ import tyro
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from checkpoint_utils import load_lightning_checkpoint
+from SpeechToText.models.common.checkpoint_io import load_lightning_checkpoint
 
 
 @dataclass(slots=True)
@@ -35,8 +35,8 @@ def _build_target_module(
     vocab_size = int(sp.get_piece_size()) + 1
 
     if target == "rnnt":
+        from SpeechToText.models.tdt.config import TrainConfig
         from SpeechToText.models.tdt.lit import LitFastConformerTDT
-        from SpeechToText.models.tdt.train import TrainConfig
 
         config = TrainConfig()
         if source_ckpt is not None:
@@ -50,8 +50,8 @@ def _build_target_module(
         config.model.joint.pred_d = int(config.model.encoder.d_model)
         return LitFastConformerTDT(config, sp=sp, vocab_size=vocab_size)
 
+    from SpeechToText.models.ctc_attention.config import TrainConfig
     from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
-    from SpeechToText.models.ctc_attention.train import TrainConfig
 
     config = TrainConfig()
     if source_ckpt is not None:

@@ -17,17 +17,17 @@ from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
 from SpeechToText.dataset import DataConfig, FeatureConfig, ManifestPaths
+from SpeechToText.models.common.eval_decoding import (
+    collect_probs_for_beam,
+    compute_wer_cer,
+    decode_batch_with_beam,
+    decode_batch_with_greedy,
+)
 from SpeechToText.models.common.inference import (
     ModelType,
     forward_ctc_log_probs,
     load_lit_module,
     transducer_greedy_decode_batch,
-)
-from SpeechToText.utils.decoding import (
-    collect_probs_for_beam,
-    compute_wer_cer,
-    decode_batch_with_beam,
-    decode_batch_with_greedy,
 )
 
 
@@ -257,6 +257,13 @@ def evaluate_split(
     decoders_kenlm: dict[tuple[float, float], Any],
 ) -> list[dict[str, Any]]:
     if not items:
+        return []
+
+    if model_type == "tdt" and "greedy" not in config.decode_types:
+        logger.warning(
+            "RNN-T/TDT evaluation supports only greedy decode; add 'greedy' to --decode_types (got {!r})",
+            config.decode_types,
+        )
         return []
 
     blank_id = 0
