@@ -1,225 +1,442 @@
 from __future__ import annotations
 
-import math
+import os
+import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final, cast
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio.functional as AF
 import torchaudio.transforms as T
+from loguru import logger
+from tqdm import tqdm
+
+DEFAULT_NOISE_BANK_PATH: Final[str] = "data/augment/noise_bank.pt"
+DEFAULT_RIR_BANK_PATH: Final[str] = "data/augment/rir_bank.pt"
 
 
 @dataclass(slots=True)
 class SpecAugmentConfig:
+    """SpecAugment mask counts and widths."""
+
     freq_masks: int = 2
     time_masks: int = 10
     freq_width: int = 30
     time_width_fraction: float = 0.1
 
 
-class SpecAugment(torch.nn.Module):
+class SpecAugment(nn.Module):
+    """Apply frequency and time masking to log-mel features."""
+
     def __init__(self, cfg: SpecAugmentConfig, augment_start_epoch: int = 3) -> None:
         super().__init__()
         self.cfg: Final = cfg
-        self.augment_start_epoch: Final = augment_start_epoch
-        self.current_epoch = 0
-
-        self._freq_mask = T.FrequencyMasking(freq_mask_param=cfg.freq_width)
+        self.augment_start_epoch: Final[int] = augment_start_epoch
+        self.current_epoch: int = 0
+        self._freq_mask: Final[T.FrequencyMasking] = T.FrequencyMasking(
+            freq_mask_param=cfg.freq_width
+        )
 
     def set_current_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
 
+    @torch.inference_mode()
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        if (not self.training) or (self.current_epoch < self.augment_start_epoch):
+        """Mask log-mel features with shape ``[batch, time, freq]``."""
+        if not self.training or self.current_epoch < self.augment_start_epoch:
             return feats
 
-        if feats.dim() != 3:
-            raise ValueError(f"Expected (B,T,F); got {tuple(feats.shape)}")
-
-        b, t, f = feats.shape
-        x = feats.transpose(1, 2)
+        masked = feats.transpose(1, 2).contiguous()
 
         for _ in range(self.cfg.freq_masks):
-            x = self._freq_mask(x)
+            masked = self._freq_mask(masked)
 
-        max_time_width = max(1, int(t * self.cfg.time_width_fraction))
-        time_mask = T.TimeMasking(time_mask_param=max_time_width)
+        _, _, time_steps = masked.shape
+        max_width = max(1, int(time_steps * self.cfg.time_width_fraction))
         for _ in range(self.cfg.time_masks):
-            x = time_mask(x)
+            width = int(torch.randint(0, max_width + 1, ()).item())
+            if width <= 0:
+                continue
+            start = int(torch.randint(0, max(1, time_steps - width + 1), ()).item())
+            masked[:, :, start : start + width] = 0.0
 
-        return x.transpose(1, 2)
+        return masked.transpose(1, 2).contiguous()
 
 
 @dataclass(slots=True)
 class AudioAugmentConfig:
-    prob_apply: float = 0.7
+    """Audio-domain augmentation probabilities and ranges."""
 
+    augment_start_epoch: int = 7
+    heavy_augment_start_epoch: int = 30
+    prob_apply: float = 0.5
     speed_factors: tuple[float, ...] = (0.95, 0.98, 1.0, 1.02, 1.05)
-    speed_prob: float = 0.7
-
+    speed_prob: float = 0.5
     gain_prob: float = 0.3
     gain_db_min: float = -6.0
     gain_db_max: float = 6.0
-
-    phone_prob: float = 0.2
+    gain_db_mean: float = 0.0
+    gain_db_std: float = 4.0
+    phone_prob: float = 0.0
     phone_down_sr: int = 8000
     phone_highpass_hz: float = 300.0
     phone_lowpass_hz: float = 3400.0
-
-    rir_prob: float = 0.2
+    rir_prob: float = 0.1
     rir_bank: tuple[torch.Tensor, ...] | None = None
-
     bg_noise_prob: float = 0.3
     snr_db_min: float = 5.0
     snr_db_max: float = 20.0
+    snr_db_mean: float = 10.0
+    snr_db_std: float = 5.0
     noise_bank: tuple[torch.Tensor, ...] | None = None
-
     gaussian_prob: float = 0.0
     gaussian_scale: float = 0.005
 
 
+def _postprocess_bank_clip(
+    waveform: torch.Tensor,
+    *,
+    sample_rate: int,
+    min_len_sec: float,
+    normalize_rirs: bool,
+    max_rir_len_sec: float | None,
+) -> torch.Tensor | None:
+    waveform = waveform.detach().float().reshape(-1)
+    if waveform.numel() < int(min_len_sec * sample_rate):
+        return None
+
+    if normalize_rirs and max_rir_len_sec is not None:
+        max_samples = int(max_rir_len_sec * sample_rate)
+        if waveform.size(-1) > max_samples:
+            waveform = waveform[:max_samples]
+
+    if normalize_rirs:
+        energy = waveform.abs().sum()
+        if energy > 1e-6:
+            waveform = waveform / energy
+
+    return waveform
+
+
+def _load_bank_from_pt(
+    pt_path: Path,
+    *,
+    sample_rate: int,
+    min_len_sec: float,
+    normalize_rirs: bool,
+    max_rir_len_sec: float | None,
+) -> tuple[torch.Tensor, ...] | None:
+    raw = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+    if isinstance(raw, tuple):
+        clips = list(raw)
+    elif isinstance(raw, list):
+        clips = raw
+    else:
+        logger.warning("Unsupported bank format in {}: {}", pt_path, type(raw))
+        return None
+
+    loaded: list[torch.Tensor] = []
+    for clip in clips:
+        if not isinstance(clip, torch.Tensor):
+            continue
+        processed = _postprocess_bank_clip(
+            clip,
+            sample_rate=sample_rate,
+            min_len_sec=min_len_sec,
+            normalize_rirs=normalize_rirs,
+            max_rir_len_sec=max_rir_len_sec,
+        )
+        if processed is not None:
+            loaded.append(processed)
+
+    if not loaded:
+        return None
+
+    logger.info("Loaded {} clips from prebuilt bank {}", len(loaded), pt_path)
+    return tuple(loaded)
+
+
+def _load_bank_from_directory(
+    root_path: Path,
+    *,
+    sample_rate: int,
+    max_files: int,
+    min_len_sec: float,
+    normalize_rirs: bool,
+    max_size_bytes: int,
+    max_rir_len_sec: float | None,
+) -> tuple[torch.Tensor, ...] | None:
+    import soundfile as sf
+
+    logger.info("Scanning for audio files in {}", root_path)
+    all_files: list[Path] = []
+    scan_limit = max_files * 3
+    scanned = 0
+    for extension in ("*.wav", "*.flac"):
+        for path in root_path.rglob(extension):
+            all_files.append(path)
+            scanned += 1
+            if scanned >= scan_limit:
+                break
+        if scanned >= scan_limit:
+            break
+
+    if not all_files:
+        return None
+
+    random.shuffle(all_files)
+    files_to_load = all_files[:max_files]
+    loaded: list[torch.Tensor] = []
+
+    for path in tqdm(files_to_load, desc=f"Loading bank from {root_path.name}"):
+        try:
+            if os.path.getsize(path) > max_size_bytes:
+                continue
+
+            data, sr = sf.read(str(path))
+            wav = torch.from_numpy(data).float()
+
+            if wav.ndim == 1:
+                wav = wav.unsqueeze(0)
+            else:
+                wav = wav.transpose(0, 1)
+
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=True)
+            if sr != sample_rate:
+                wav = AF.resample(wav, sr, sample_rate)
+
+            processed = _postprocess_bank_clip(
+                wav.squeeze(0),
+                sample_rate=sample_rate,
+                min_len_sec=min_len_sec,
+                normalize_rirs=normalize_rirs,
+                max_rir_len_sec=max_rir_len_sec,
+            )
+            if processed is not None:
+                loaded.append(processed)
+        except OSError:
+            continue
+
+    if not loaded:
+        return None
+
+    logger.info("Loaded {} clips into memory from {}", len(loaded), root_path)
+    return tuple(loaded)
+
+
+def load_audio_bank(
+    root_path: str | None,
+    sample_rate: int = 16000,
+    max_files: int = 2000,
+    min_len_sec: float = 1.0,
+    normalize_rirs: bool = False,
+    max_size_bytes: int = 20 * 1024 * 1024,
+    max_rir_len_sec: float | None = 0.5,
+) -> tuple[torch.Tensor, ...] | None:
+    """Load a bank of mono waveforms from a ``.pt`` archive or directory tree.
+
+    Args:
+        root_path: Path to a ``torch.save`` tuple of 1-D tensors, or a directory
+            containing ``.wav`` / ``.flac`` files.
+        sample_rate: Target sample rate for directory scans.
+        max_files: Maximum number of clips to keep when scanning directories.
+        min_len_sec: Minimum clip duration in seconds.
+        normalize_rirs: Whether to peak-normalize impulse responses.
+        max_size_bytes: Skip files larger than this size during directory scans.
+        max_rir_len_sec: Truncate RIR clips to this duration when set.
+
+    Returns:
+        Tuple of 1-D waveform tensors, or ``None`` when no clips were loaded.
+    """
+    if not root_path or not os.path.exists(root_path):
+        return None
+
+    path = Path(root_path)
+    if path.is_file() and path.suffix == ".pt":
+        return _load_bank_from_pt(
+            path,
+            sample_rate=sample_rate,
+            min_len_sec=min_len_sec,
+            normalize_rirs=normalize_rirs,
+            max_rir_len_sec=max_rir_len_sec,
+        )
+
+    if path.is_dir():
+        return _load_bank_from_directory(
+            path,
+            sample_rate=sample_rate,
+            max_files=max_files,
+            min_len_sec=min_len_sec,
+            normalize_rirs=normalize_rirs,
+            max_size_bytes=max_size_bytes,
+            max_rir_len_sec=max_rir_len_sec,
+        )
+
+    logger.warning("Audio bank path exists but is not a .pt file or directory: {}", path)
+    return None
+
+
 class AudioAugmentation:
+    """CPU-side waveform augmentations applied before featurization."""
+
     def __init__(
         self, cfg: AudioAugmentConfig, sample_rate: int = 16_000, augment_start_epoch: int = 3
     ) -> None:
-        self.cfg: Final = cfg
-        self.sample_rate: Final = sample_rate
-        self.augment_start_epoch: Final = augment_start_epoch
+        self.cfg = cfg
+        self.sample_rate = sample_rate
+        self.augment_start_epoch = augment_start_epoch
         self.current_epoch = 0
-
-        pairs: list[tuple[T.Resample, T.Resample] | None] = []
-        for f in cfg.speed_factors:
-            if f == 1.0:
-                pairs.append(None)
-            else:
-                mid_sr = int(round(sample_rate * f))
-                pairs.append((T.Resample(sample_rate, mid_sr), T.Resample(mid_sr, sample_rate)))
-        self._speed_pairs: Final[tuple[tuple[T.Resample, T.Resample] | None, ...]] = tuple(pairs)
-
-        self._phone_down: Final = T.Resample(sample_rate, cfg.phone_down_sr)
-        self._phone_up: Final = T.Resample(cfg.phone_down_sr, sample_rate)
+        self._phone_down = T.Resample(sample_rate, cfg.phone_down_sr)
+        self._phone_up = T.Resample(cfg.phone_down_sr, sample_rate)
 
     def set_current_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
 
     @staticmethod
-    def _as_1d(x: torch.Tensor) -> torch.Tensor:
-        if x.dim() == 1:
+    def _speed(x: torch.Tensor, cfg: AudioAugmentConfig) -> torch.Tensor:
+        if cfg.speed_prob <= 0.0 or float(torch.rand(()).item()) > cfg.speed_prob:
             return x
-        if x.dim() == 2 and x.size(0) == 1:
-            return x.squeeze(0)
-        raise ValueError(f"Expected (T,) or (1,T); got {tuple(x.shape)}")
+        factor_index = int(torch.randint(0, len(cfg.speed_factors), ()).item())
+        factor = float(cfg.speed_factors[factor_index])
+        if factor == 1.0:
+            return x
+
+        new_len = max(1, int(round(x.numel() / factor)))
+        return F.interpolate(
+            x.view(1, 1, -1), size=new_len, mode="linear", align_corners=False
+        ).view(-1)
 
     @staticmethod
-    def _fix_len(x: torch.Tensor, target_len: int) -> torch.Tensor:
-        n = x.numel()
-        if n == target_len:
+    def _telephone(
+        x: torch.Tensor, cfg: AudioAugmentConfig, down: T.Resample, up: T.Resample
+    ) -> torch.Tensor:
+        if float(torch.rand(()).item()) > cfg.phone_prob:
             return x
-        if n > target_len:
-            return x[:target_len]
-        return F.pad(x, (0, target_len - n))
-
-    @staticmethod
-    def _rand_uniform_like(x: torch.Tensor, a: float, b: float) -> float:
-        return float(x.new_empty(()).uniform_(a, b).item())
-
-    def _speed(self, x: torch.Tensor) -> torch.Tensor:
-        if float(torch.rand(()).item()) > self.cfg.speed_prob:
-            return x
-        idx = int(torch.randint(0, len(self.cfg.speed_factors), ()).item())
-        pair = self._speed_pairs[idx]
-        if pair is None:
-            return x
-        down, up = pair
-        t0 = x.numel()
+        original_len = x.numel()
         y = up(down(x.unsqueeze(0))).squeeze(0)
-        y = self._fix_len(y, t0)
-        return y
+        if y.numel() > original_len:
+            y = y[:original_len]
+        elif y.numel() < original_len:
+            y = F.pad(y, (0, original_len - y.numel()))
+        return cast(torch.Tensor, y)
 
-    def _gain_db(self, x: torch.Tensor) -> torch.Tensor:
-        if float(torch.rand(()).item()) > self.cfg.gain_prob:
-            return x
-        gain_db = self._rand_uniform_like(x, self.cfg.gain_db_min, self.cfg.gain_db_max)
-        gain = math.pow(10.0, gain_db / 20.0)
-        return x * gain
+    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
+        if self.current_epoch < self.augment_start_epoch:
+            return audio
+        if float(torch.rand(()).item()) > self.cfg.prob_apply:
+            return audio
 
-    def _telephone(self, x: torch.Tensor) -> torch.Tensor:
-        if float(torch.rand(()).item()) > self.cfg.phone_prob:
-            return x
-        t0 = x.numel()
-        y = self._phone_up(self._phone_down(x.unsqueeze(0))).squeeze(0)
-        y = self._fix_len(y, t0)
-        y = cast(
-            torch.Tensor,
-            AF.highpass_biquad(
-                y,
-                sample_rate=self.sample_rate,
-                cutoff_freq=self.cfg.phone_highpass_hz,
-            ),
-        )
-        y = cast(
-            torch.Tensor,
-            AF.lowpass_biquad(
-                y,
-                sample_rate=self.sample_rate,
-                cutoff_freq=self.cfg.phone_lowpass_hz,
-            ),
-        )
-        return y
+        waveform = audio
+        if self.cfg.speed_prob > 0.0:
+            waveform = self._speed(waveform, self.cfg)
+        if self.cfg.phone_prob > 0.0:
+            waveform = self._telephone(waveform, self.cfg, self._phone_down, self._phone_up)
+        return waveform
 
-    def _rir(self, x: torch.Tensor) -> torch.Tensor:
-        bank = self.cfg.rir_bank
-        if float(torch.rand(()).item()) > self.cfg.rir_prob or not bank:
-            return x
-        rir = self._as_1d(bank[int(torch.randint(0, len(bank), ()).item())]).to(
-            device=x.device, dtype=x.dtype
-        )
-        rir = rir / rir.abs().sum().clamp_min(1e-6)
-        w = rir.flip(0).view(1, 1, -1)
-        y = F.conv1d(x.view(1, 1, -1), w, padding=rir.numel() - 1).view(-1)
-        return y[: x.numel()]
 
-    def _bg_noise_snr(self, x: torch.Tensor) -> torch.Tensor:
-        bank = self.cfg.noise_bank
-        if float(torch.rand(()).item()) > self.cfg.bg_noise_prob or not bank:
-            return x
+class GPUAudioAugmentation(nn.Module):
+    """GPU-side augmentations for batched waveforms during training."""
 
-        noise = self._as_1d(bank[int(torch.randint(0, len(bank), ()).item())]).to(
-            device=x.device, dtype=x.dtype
-        )
-        t0 = x.numel()
+    def __init__(
+        self,
+        cfg: AudioAugmentConfig,
+        rir_bank: tuple[torch.Tensor, ...] | None,
+        noise_bank: tuple[torch.Tensor, ...] | None,
+    ) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.rir_bank = list(rir_bank) if rir_bank else None
+        self.noise_bank = list(noise_bank) if noise_bank else None
+        self.current_epoch = 0
 
-        if noise.numel() < t0:
-            reps = (t0 + noise.numel() - 1) // noise.numel()
-            noise = noise.repeat(reps)[:t0]
-        else:
-            start = int(torch.randint(0, max(1, noise.numel() - t0 + 1), ()).item())
-            noise = noise[start : start + t0]
-
-        snr_db = self._rand_uniform_like(x, self.cfg.snr_db_min, self.cfg.snr_db_max)
-        return cast(torch.Tensor, AF.add_noise(x, noise, snr=x.new_tensor(snr_db)))
-
-    def _gaussian(self, x: torch.Tensor) -> torch.Tensor:
-        if self.cfg.gaussian_prob <= 0.0 or float(torch.rand(()).item()) > self.cfg.gaussian_prob:
-            return x
-        x_noised = x.add(torch.randn_like(x), alpha=self.cfg.gaussian_scale)
-        return x_noised
+    def set_current_epoch(self, epoch: int) -> None:
+        self.current_epoch = int(epoch)
 
     @torch.inference_mode()
-    def __call__(self, audio: torch.Tensor) -> torch.Tensor:
-        x = self._as_1d(audio).contiguous()
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        """Apply gain, noise, and reverberation augmentations to ``[batch, time]``."""
+        if not self.training:
+            return audio
 
-        if self.current_epoch < self.augment_start_epoch:
-            return x
-        if float(torch.rand(()).item()) > self.cfg.prob_apply:
-            return x
+        if self.current_epoch < self.cfg.augment_start_epoch:
+            return audio
 
-        x = self._speed(x)
-        x = self._gain_db(x)
-        x = self._telephone(x)
-        x = self._rir(x)
-        x = self._bg_noise_snr(x)
-        x = self._gaussian(x)
-        x = x.clamp(-1.0, 1.0)
-        return x
+        batch_size, time_steps = audio.shape
+        device = audio.device
+
+        if self.cfg.gain_prob > 0.0:
+            gain_mask = torch.rand(batch_size, device=device) < self.cfg.gain_prob
+            if gain_mask.any():
+                gains_db = torch.zeros(batch_size, device=device).normal_(
+                    self.cfg.gain_db_mean, self.cfg.gain_db_std
+                )
+                gains_db = gains_db.clamp(self.cfg.gain_db_min, self.cfg.gain_db_max)
+                gains = torch.pow(10.0, gains_db / 20.0)
+                gains = torch.where(gain_mask, gains, torch.ones_like(gains))
+                audio = audio * gains.unsqueeze(1)
+
+        if self.cfg.gaussian_prob > 0.0:
+            noise_mask = torch.rand(batch_size, device=device) < self.cfg.gaussian_prob
+            if noise_mask.any():
+                noise = torch.randn_like(audio) * self.cfg.gaussian_scale
+                audio = torch.where(noise_mask.unsqueeze(1), audio + noise, audio)
+
+        if self.current_epoch < self.cfg.heavy_augment_start_epoch:
+            return audio.clamp(-1.0, 1.0)
+
+        if self.cfg.rir_prob > 0.0 and self.rir_bank:
+            rir_mask = torch.rand(batch_size, device=device) < self.cfg.rir_prob
+            if rir_mask.any():
+                indices = [random.randint(0, len(self.rir_bank) - 1) for _ in range(batch_size)]
+                selected_rirs = [self.rir_bank[index] for index in indices]
+                max_rir_len = max(rir.shape[0] for rir in selected_rirs)
+                rir_batch = (
+                    torch.stack(
+                        [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in selected_rirs]
+                    )
+                    .to(device, non_blocking=True)
+                    .unsqueeze(1)
+                )
+                rir_batch = rir_batch.flip(2)
+
+                padding = max_rir_len - 1
+                convolved = F.conv1d(
+                    audio.unsqueeze(0),
+                    rir_batch,
+                    padding=padding,
+                    groups=batch_size,
+                ).squeeze(0)[:, :time_steps]
+                audio = torch.where(rir_mask.unsqueeze(1), convolved, audio)
+
+        if self.cfg.bg_noise_prob > 0.0 and self.noise_bank:
+            noise_mask = torch.rand(batch_size, device=device) < self.cfg.bg_noise_prob
+            if noise_mask.any():
+                indices = [random.randint(0, len(self.noise_bank) - 1) for _ in range(batch_size)]
+                snrs_db = torch.zeros(batch_size, device=device).normal_(
+                    self.cfg.snr_db_mean, self.cfg.snr_db_std
+                )
+                snrs_db = snrs_db.clamp(self.cfg.snr_db_min, self.cfg.snr_db_max)
+
+                for index in range(batch_size):
+                    if not noise_mask[index]:
+                        continue
+                    noise = self.noise_bank[indices[index]].to(device, non_blocking=True)
+                    if noise.numel() < time_steps:
+                        repeats = (time_steps + noise.numel() - 1) // noise.numel()
+                        noise = noise.repeat(repeats)[:time_steps]
+                    else:
+                        start = random.randint(0, max(0, noise.numel() - time_steps))
+                        noise = noise[start : start + time_steps]
+
+                    signal_power = audio[index].pow(2).mean()
+                    noise_power = noise.pow(2).mean()
+                    if noise_power > 0:
+                        target_noise_power = signal_power / (10.0 ** (snrs_db[index] / 10.0))
+                        scale = (target_noise_power / noise_power).sqrt()
+                        audio[index] = audio[index] + noise * scale
+
+        return audio.clamp(-1.0, 1.0)

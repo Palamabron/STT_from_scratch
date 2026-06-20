@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import lightning.pytorch as pl
 import torch
 import torch.nn as nn
@@ -7,6 +9,8 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
+from SpeechToText.augmentation import SpecAugment
+from SpeechToText.features import WaveformFeaturizer
 from SpeechToText.models.common import (
     ExamplesBuffer,
     ctc_ids_to_texts_spm,
@@ -14,81 +18,96 @@ from SpeechToText.models.common import (
     wer_cer_by_lang,
 )
 from SpeechToText.models.common.optimizers import configure_adamw_noam
+from SpeechToText.models.common.validation_logging import (
+    WorstValExamplesCollector,
+    log_wandb_worst_val_examples,
+)
 from SpeechToText.models.ctc_attention.model import FastConformerCTCAttention
 from SpeechToText.models.ctc_attention.steps import compute_ctc_attn_losses
-from SpeechToText.models.ctc_attention.train import TrainConfig
 from SpeechToText.models.typing import CTCAttnOutput, TrainBatch, ValBatch
 
 
 class LitFastConformerCTCAttention(pl.LightningModule):
+    """Lightning module for joint CTC and attention-decoder training."""
+
     def __init__(
         self,
-        config: TrainConfig,
-        *,
-        ctc_vocab_size: int,
-        sp_vocab_size: int,
+        config: Any,
         sp: SentencePieceProcessor,
-        blank_id: int = 0,
     ) -> None:
         super().__init__()
         self.config = config
         self.sp = sp
 
-        self.blank_id = int(blank_id)
-        self.sp_vocab_size = int(sp_vocab_size)
+        sp_vocab = int(sp.get_piece_size())
+        self.vocab_size = sp_vocab + 1
+        self.blank_id = 0
+        self.pad_id = sp.pad_id() + 1
+        self.bos_id = sp.bos_id() + 1
+        self.eos_id = sp.eos_id() + 1
 
-        self.pad_id = self.sp_vocab_size
-        self.bos_id = self.sp_vocab_size + 1
-        self.eos_id = self.sp_vocab_size + 2
+        spec_augment = SpecAugment(
+            config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
+        )
+        self.featurizer = WaveformFeaturizer(
+            config.data.features,
+            spec_augment=spec_augment,
+        )
 
-        self.net: FastConformerCTCAttention = FastConformerCTCAttention(
+        self.net = FastConformerCTCAttention(
             config.model,
-            ctc_vocab_size=int(ctc_vocab_size),
-            sp_vocab_size=self.sp_vocab_size,
+            vocab_size=self.vocab_size,
             blank_id=self.blank_id,
+            pad_id=self.pad_id,
+            bos_id=self.bos_id,
+            eos_id=self.eos_id,
         )
 
         self.ctc_loss = nn.CTCLoss(blank=self.blank_id, zero_infinity=True, reduction="mean")
         self.attn_loss = nn.NLLLoss(ignore_index=self.pad_id, reduction="mean")
-
         self.examples = ExamplesBuffer(per_lang=2)
+        self._val_examples = WorstValExamplesCollector(max_examples=50)
         self.save_hyperparameters(ignore=["sp"])
+
+    def on_fit_start(self) -> None:
+        self.featurizer = self.featurizer.to(self.device)
+
+    def _encode_batch(
+        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.featurizer.set_current_epoch(self.current_epoch)
+        return cast(
+            tuple[torch.Tensor, torch.Tensor], self.featurizer(audio.to(self.device), audio_lengths)
+        )
 
     def build_decoder_sequences(
         self,
         targets_concat: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        targets_concat: concat 1D of CTC targets (blank=0, sp_id+1)
-        decoder vocab: sp_id in [0..sp_vocab-1] plus pad/bos/eos
-        """
+        """Build teacher-forced decoder input and target sequences."""
         device = targets_concat.device
-        b = int(target_lengths.shape[0])
-        max_len = int(target_lengths.max().item()) if b > 0 else 0
+        batch_size = int(target_lengths.shape[0])
+        max_len = int(target_lengths.max().item()) if batch_size > 0 else 0
 
-        dec_in = torch.full((b, max_len + 1), self.pad_id, dtype=torch.long, device=device)
-        dec_out = torch.full((b, max_len + 1), self.pad_id, dtype=torch.long, device=device)
+        dec_in = torch.full((batch_size, max_len + 1), self.pad_id, dtype=torch.long, device=device)
+        dec_out = torch.full(
+            (batch_size, max_len + 1), self.pad_id, dtype=torch.long, device=device
+        )
 
-        off = 0
-        for i in range(b):
-            u = int(target_lengths[i].item())
-            if u == 0:
-                dec_in[i, 0] = self.bos_id
-                dec_out[i, 0] = self.eos_id
+        offset = 0
+        for index in range(batch_size):
+            target_len = int(target_lengths[index].item())
+            if target_len == 0:
+                dec_in[index, 0] = self.bos_id
+                dec_out[index, 0] = self.eos_id
                 continue
-
-            seq = targets_concat[off : off + u]
-            off += u
-
-            piece_seq = seq - 1  # CTC target (sp+1) -> sp_id
-
-            dec_in[i, 0] = self.bos_id
-            dec_in[i, 1 : u + 1] = piece_seq
-
-            dec_out[i, 0:u] = piece_seq
-            dec_out[i, u] = self.eos_id
-
+            sequence = targets_concat[offset : offset + target_len]
+            offset += target_len
+            dec_in[index, 0] = self.bos_id
+            dec_in[index, 1 : target_len + 1] = sequence
+            dec_out[index, 0:target_len] = sequence
+            dec_out[index, target_len] = self.eos_id
         return dec_in, dec_out
 
     def forward(
@@ -97,42 +116,42 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         feat_lengths: torch.Tensor,
         decoder_input: torch.Tensor | None = None,
     ) -> CTCAttnOutput:
-        output: CTCAttnOutput = self.net(feats, feat_lengths, decoder_input=decoder_input)
-        return output
+        return cast(CTCAttnOutput, self.net(feats, feat_lengths, decoder_input=decoder_input))
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
         d_model = int(self.config.model.encoder.d_model)
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = int(total_steps * opt_cfg.warmup_ratio)
 
         return configure_adamw_noam(
             self,
-            learning_rate=opt_cfg.learning_rate,
+            lr=opt_cfg.lr,
             betas=opt_cfg.betas,
-            epsilon=opt_cfg.epsilon,
-            weight_decay=opt_cfg.weight_decay,
-            warmup_steps=int(opt_cfg.warmup_steps),
+            weight_decay=getattr(opt_cfg, "weight_decay", 0.01),
+            warmup_steps=max(1, warmup_steps),
             d_model=d_model,
         )
 
-    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor:
-        feats = batch["features"]
-        feat_lengths = batch["feature_lengths"]
+    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor | None:
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lengths = batch["target_lengths"]
+        target_lengths = batch["target_length"]
 
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
         dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
-        out = self.net(feats, feat_lengths, decoder_input=dec_in)
+        out = self.forward(feats, feat_lens, decoder_input=dec_in)
+        assert out.dec_log_probs is not None
 
         if (out.out_lengths < target_lengths).any():
-            diff = (out.out_lengths - target_lengths).min().item()
-            raise RuntimeError(
-                f"CTC input length smaller than target length. Min(input_len-target_len)={diff}"
+            skipped = int((out.out_lengths < target_lengths).sum().item())
+            logger.warning(
+                "CTC input length < target length for {} utterances after augmentation; "
+                "skipping batch.",
+                skipped,
             )
-
-        if out.dec_log_probs is None:
-            raise RuntimeError("Expected decoder outputs during training, got None.")
-
-        autocast_device_type = "cuda" if out.ctc_log_probs.is_cuda else "cpu"
+            return None
 
         losses = compute_ctc_attn_losses(
             ctc_log_probs=out.ctc_log_probs,
@@ -146,79 +165,84 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             ctc_label_smoothing=self.config.ctc_label_smoothing,
             aux_ctc_weight=self.config.aux_ctc_weight,
             ctc_weight=self.config.ctc_weight,
-            autocast_device_type=autocast_device_type,
+            autocast_device_type="cuda" if out.ctc_log_probs.is_cuda else "cpu",
             attn_loss_fn=self.attn_loss,
         )
 
         self.log_dict(
             {
                 "train/loss": losses.total,
-                "train/loss_ctc_main": losses.ctc_main,
-                "train/loss_ctc_aux": losses.ctc_aux,
+                "train/loss_ctc": losses.ctc_main,
                 "train/loss_attn": losses.attn,
             },
             prog_bar=True,
             on_step=True,
-            on_epoch=True,
-            sync_dist=False,
-            batch_size=feats.size(0),
+            batch_size=audio.size(0),
         )
 
-        if not torch.isfinite(losses.total):
-            logger.error(
-                f"[NaN] loss={losses.total} step={self.global_step} epoch={self.current_epoch}"
-            )
-            raise RuntimeError("NaN/Inf in loss.")
         return losses.total
 
     def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
-        feats = batch["features"]
-        feat_lengths = batch["feature_lengths"]
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lengths = batch["target_lengths"]
-        texts = batch["text"]
-        langs = batch.get("language")
+        target_lengths = batch["target_length"]
 
-        out = self.net(feats, feat_lengths, decoder_input=None)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        out = self.forward(feats, feat_lens, decoder_input=None)
 
-        if (out.out_lengths < target_lengths).any():
-            diff = (out.out_lengths - target_lengths).min().item()
-            raise RuntimeError(
-                f"[VAL] CTC input length smaller than target length. Min(input_len-target_len)={diff}"
-            )
-
-        # nn.CTCLoss wants (T, N, C) so we transpose(0, 1)
         loss = self.ctc_loss(
-            out.ctc_log_probs.transpose(0, 1),
-            targets,
-            out.out_lengths,
-            target_lengths,
+            out.ctc_log_probs.transpose(0, 1), targets, out.out_lengths, target_lengths
         )
 
         decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=self.blank_id)
+        self._val_examples.accumulate_blank_stats(
+            out.ctc_log_probs, out.out_lengths, self.blank_id
+        )
         pred_texts = ctc_ids_to_texts_spm(self.sp, decoded)
-        m = wer_cer_by_lang(texts, pred_texts, langs)
 
-        bs = len(texts)
-        self.log("val/loss", loss, prog_bar=True, on_epoch=True, sync_dist=False, batch_size=bs)
+        texts_ref = batch.get("text", [])
+        langs = batch.get("language", ["unknown"] * len(pred_texts))
+        datasets = batch.get("dataset", ["unknown"] * len(pred_texts))
+
+        for index, (ref, hyp, lang) in enumerate(zip(texts_ref, pred_texts, langs, strict=True)):
+            self.examples.add(lang, ref, hyp)
+            self._val_examples.add(
+                dataset=datasets[index] if index < len(datasets) else "unknown",
+                language=lang,
+                reference=ref,
+                hypothesis=hyp,
+                audio=audio[index, : int(audio_lengths[index].item())],
+            )
+
+        metrics = wer_cer_by_lang(batch["text"], pred_texts, batch.get("language"))
+
+        batch_size = audio.size(0)
+        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=batch_size)
         self.log_dict(
-            {f"val/{k}": v for k, v in m.items()},
-            prog_bar=True,
-            on_epoch=True,
-            sync_dist=False,
-            batch_size=bs,
+            {f"val/{k}": v for k, v in metrics.items()}, on_epoch=True, batch_size=batch_size
         )
 
-        for lang, ref, hyp in zip((langs or ["unknown"] * bs), texts, pred_texts, strict=True):
-            self.examples.add(lang, ref, hyp)
+        return {"wer": metrics["wer/overall"]}
 
-        return {"wer": m["wer/overall"], "cer": m["cer/overall"]}
+    def on_validation_epoch_start(self) -> None:
+        self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
+        self.log(
+            "val/blank_fraction",
+            self._val_examples.blank_fraction(),
+            prog_bar=True,
+            on_epoch=True,
+        )
+        log_wandb_worst_val_examples(
+            self.logger,
+            self._val_examples.worst_first(),
+            sample_rate=int(self.config.data.features.sample_rate),
+            epoch=int(self.current_epoch),
+        )
+
         for lang, pairs in self.examples.pop_all().items():
-            if not pairs:
-                continue
-            logger.info(f"[VAL][{lang}] --- examples epoch {self.current_epoch} ---")
-            for ref, hyp in pairs:
-                logger.info(f"[VAL][{lang}] REF: {ref}")
-                logger.info(f"[VAL][{lang}] HYP: {hyp}")
+            if pairs:
+                ref, hyp = pairs[0]
+                logger.info("[VAL][{}] REF: {} | HYP: {}", lang, ref, hyp)

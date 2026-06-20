@@ -7,10 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from SpeechToText.models.conformer import FastConformerEncoder, FastConformerEncoderConfig
+from SpeechToText.models.typing import TDTOutput
 
 from .decoder import TDTDecoder, TDTDecoderConfig
 from .joint import JointNet, JointNetConfig
-from .typing import TDTOutput
 
 
 @dataclass
@@ -79,11 +79,11 @@ class FastConformerTDT(nn.Module):
         targets_concat: torch.Tensor,
         target_lengths: torch.Tensor,
     ) -> TDTOutput:
-        enc, out_lengths = self.encoder(feats, feat_lengths)  # [B,T,D], [B]
+        enc, out_lengths = self.encoder(feats, feat_lengths)
         dec_in = self.build_decoder_input_from_concat(targets_concat, target_lengths, self.blank_id)
-        dec = self.decoder(dec_in)  # [B,U+1,D]
+        dec = self.decoder(dec_in)
 
-        logits = self.joint(enc, dec)  # [B,T,U+1,V]
+        logits = self.joint(enc, dec)
         log_probs = F.log_softmax(logits, dim=-1)
 
         return TDTOutput(

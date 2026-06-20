@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import torch
 import torchaudio
 import tyro
-from dataset import DataConfig
+from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.models.ctc_attention.train import LitFastConformerCTCAttention
-from SpeechToText.utils.audio import build_feature_transforms, extract_features
-from SpeechToText.utils.decoding import greedy_decode_single
+from SpeechToText.models.common import ctc_ids_to_texts_spm, greedy_ctc_decode
+from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
 
 
+@dataclass
 class TranscribeConfig:
     checkpoint: str
     tokenizer_model: str
@@ -28,15 +30,8 @@ def get_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
-def load_model_and_frontend(
-    cfg: TranscribeConfig,
-) -> tuple[
-    LitFastConformerCTCAttention,
-    SentencePieceProcessor,
-    DataConfig,
-    torchaudio.transforms.MelSpectrogram,
-    torchaudio.transforms.AmplitudeToDB,
-]:
+@torch.inference_mode()
+def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]:
     device = get_device(cfg.device)
     sp = SentencePieceProcessor()
     sp.load(cfg.tokenizer_model)
@@ -49,42 +44,24 @@ def load_model_and_frontend(
     model.eval()
     model.to(device)
 
-    data_config = DataConfig(
-        train_manifest="",
-        val_manifest="",
-        tokenizer_model=cfg.tokenizer_model,
-        sample_rate=cfg.sample_rate,
-    )
-    mel_spec, amplitude_to_db = build_feature_transforms(data_config)
-    mel_spec.to(device)
-    amplitude_to_db.to(device)
-
-    return model, sp, data_config, mel_spec, amplitude_to_db
-
-
-@torch.inference_mode()
-def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]:
-    device = get_device(cfg.device)
-    model, sp, data_config, mel_spec, amplitude_to_db = load_model_and_frontend(cfg)
+    transcripts: list[str] = []
     blank_id = 0
 
-    transcripts: list[str] = []
     for path in audio_paths:
-        mel, feat_len = extract_features(
-            audio_path=path,
-            data_config=data_config,
-            mel_spec=mel_spec,
-            amplitude_to_db=amplitude_to_db,
-            device=device,
-        )
-        feats = mel.unsqueeze(0)
-        feat_lengths = torch.tensor([feat_len], device=device, dtype=torch.long)
+        wav, sr = torchaudio.load(path)
+        if wav.dim() == 2 and wav.size(0) > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if sr != cfg.sample_rate:
+            wav = torchaudio.functional.resample(wav, sr, cfg.sample_rate)
 
-        outputs = model(feats, feat_lengths)
-        log_probs = outputs[0][0]
-        out_len = int(outputs[1][0].item())
+        audio = wav.squeeze(0).unsqueeze(0).to(device)
+        audio_lengths = torch.tensor([audio.size(1)], device=device, dtype=torch.long)
 
-        text = greedy_decode_single(log_probs, out_len, sp, blank_id=blank_id)
+        feats, feat_lens = model.featurizer(audio, audio_lengths)
+        out = model(feats, feat_lens, decoder_input=None)
+
+        decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=blank_id)
+        text = ctc_ids_to_texts_spm(sp, decoded)[0]
         transcripts.append(text)
 
     return transcripts
@@ -93,7 +70,7 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
 def main(audio_paths: list[str], cfg: TranscribeConfig) -> None:
     texts = transcribe_files(cfg, audio_paths)
     for path, text in zip(audio_paths, texts, strict=False):
-        print(f"{path}: {text}")
+        logger.info("{}: {}", path, text)
 
 
 if __name__ == "__main__":

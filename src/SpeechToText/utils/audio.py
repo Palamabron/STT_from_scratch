@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 import torchaudio
 
-from SpeechToText.models.common.config import DataConfig
+from SpeechToText.dataset import DataConfig
 
 _RESAMPLERS: dict[tuple[int, int], torchaudio.transforms.Resample] = {}
 
@@ -12,20 +12,21 @@ def build_feature_transforms(
     cfg: DataConfig,
 ) -> tuple[torchaudio.transforms.MelSpectrogram, torchaudio.transforms.AmplitudeToDB]:
     """Return MelSpectrogram and AmplitudeToDB transforms."""
-    win_length = int(cfg.sample_rate * cfg.win_length_ms / 1000.0)
-    hop_length = int(cfg.sample_rate * cfg.hop_length_ms / 1000.0)
+    feat = cfg.features
+    win_length = int(feat.sample_rate * feat.win_length_ms / 1000.0)
+    hop_length = int(feat.sample_rate * feat.hop_length_ms / 1000.0)
 
     mel_spec = torchaudio.transforms.MelSpectrogram(
-        sample_rate=cfg.sample_rate,
-        n_fft=cfg.n_fft,
+        sample_rate=feat.sample_rate,
+        n_fft=feat.n_fft,
         win_length=win_length,
         hop_length=hop_length,
-        n_mels=cfg.n_mels,
+        n_mels=feat.n_mels,
         power=2.0,
         center=True,
         normalized=False,
     )
-    amplitude_to_db = torchaudio.transforms.AmplitudeToDB(top_db=80.0)
+    amplitude_to_db = torchaudio.transforms.AmplitudeToDB(top_db=feat.top_db)
     return mel_spec, amplitude_to_db
 
 
@@ -56,8 +57,9 @@ def extract_features(
     if waveform.dim() == 2 and waveform.size(0) > 1:
         waveform = waveform.mean(dim=0, keepdim=True)
 
-    if sample_rate != data_config.sample_rate:
-        resampler = get_or_create_resampler(sample_rate, data_config.sample_rate)
+    target_sr = data_config.features.sample_rate
+    if sample_rate != target_sr:
+        resampler = get_or_create_resampler(sample_rate, target_sr)
         waveform = resampler(waveform)
 
     waveform = waveform.to(device)
@@ -65,9 +67,6 @@ def extract_features(
     mel = mel_spec(waveform)
     mel = amplitude_to_db(mel)
     mel = mel.transpose(1, 2).squeeze(0)
-
-    if data_config.normalize_features:
-        mel = (mel - mel.mean(dim=0, keepdim=True)) / (mel.std(dim=0, keepdim=True) + 1e-5)
 
     feature_length = mel.size(0)
     return mel, feature_length

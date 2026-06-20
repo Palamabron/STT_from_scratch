@@ -28,6 +28,7 @@ class Run:
     normalize_peak: bool = True
     sample_per_dataset: int | None = None
     max_failures: int = 10000
+    num_workers: int | None = None
 
 
 @dataclass

@@ -30,7 +30,13 @@ dependencies = [
 dev = [
     "ruff>=0.6.0",
     "mypy>=1.10.0",
+    "pytest>=8.0.0",
+    "pre-commit>=4.0.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "scripts"]
+testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -50,6 +56,8 @@ ignore_missing_imports = true
 line-length = 100
 target-version = "py311"
 src = ["src", "scripts"]
+
+exclude = []
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

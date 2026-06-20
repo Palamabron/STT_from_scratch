@@ -6,19 +6,25 @@ import torch
 
 
 class CTCOutput(NamedTuple):
-    log_probs: torch.Tensor  # [B, T, V]
-    out_lengths: torch.Tensor  # [B]
-    aux_log_probs: torch.Tensor  # [Naux, B, T, V] or empty
+    """Outputs from the CTC acoustic model."""
+
+    log_probs: torch.Tensor
+    out_lengths: torch.Tensor
+    aux_log_probs: torch.Tensor
 
 
 class CTCAttnOutput(NamedTuple):
-    ctc_log_probs: torch.Tensor  # [B, T, V_ctc]
-    out_lengths: torch.Tensor  # [B]
-    aux_log_probs: torch.Tensor  # [Naux, B, T, V_ctc] or empty
-    dec_log_probs: torch.Tensor | None  # [B, U, V_dec]
+    """Outputs from the CTC + attention hybrid model."""
+
+    ctc_log_probs: torch.Tensor
+    out_lengths: torch.Tensor
+    aux_log_probs: torch.Tensor
+    dec_log_probs: torch.Tensor | None
 
 
 class TDTOutput(NamedTuple):
-    log_probs: torch.Tensor  # [B, T, U, V]
-    out_lengths: torch.Tensor  # [B]
-    target_lengths: torch.Tensor  # [B]
+    """Outputs from the token-and-duration transducer model."""
+
+    log_probs: torch.Tensor
+    out_lengths: torch.Tensor
+    target_lengths: torch.Tensor

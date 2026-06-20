@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, Final, cast
 
 import lightning.pytorch as pl
 import torch
@@ -9,118 +9,221 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
+from SpeechToText.augmentation import GPUAudioAugmentation, SpecAugment
+from SpeechToText.features import WaveformFeaturizer
 from SpeechToText.models.common import (
     ExamplesBuffer,
     ctc_ids_to_texts_spm,
     greedy_ctc_decode,
-    wer_cer_by_lang,
 )
 from SpeechToText.models.common.optimizers import configure_adamw_noam
+from SpeechToText.models.common.validation_logging import (
+    WorstValExamplesCollector,
+    log_wandb_worst_val_examples,
+)
 from SpeechToText.models.ctc.model import FastConformerCTC
 from SpeechToText.models.ctc.steps import compute_ctc_losses
-from SpeechToText.models.ctc.train import TrainConfig
-from SpeechToText.models.typing import TrainBatch, ValBatch
 
 
 class LitFastConformerCTC(pl.LightningModule):
+    """Lightning module for Fast-Conformer CTC training and validation."""
+
     def __init__(
         self,
-        config: TrainConfig,
-        vocab_size: int,
+        config: Any,
         sp: SentencePieceProcessor,
-        blank_id: int = 0,
+        rir_bank: tuple[torch.Tensor, ...] | None = None,
+        noise_bank: tuple[torch.Tensor, ...] | None = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.sp = sp
-        self.blank_id = int(blank_id)
+        self.sp: Final[SentencePieceProcessor] = sp
 
-        self.net = FastConformerCTC(config.model, vocab_size=vocab_size, blank_id=self.blank_id)
-        self.ctc_loss = nn.CTCLoss(blank=self.blank_id, zero_infinity=True, reduction="mean")
+        self.blank_id: Final[int] = 0
+        self.pad_id: Final[int] = self.blank_id
 
-        self.examples = ExamplesBuffer(per_lang=2)
-        self.save_hyperparameters(ignore=["sp"])
+        self.ctc_label_smoothing: Final[float] = float(config.ctc_label_smoothing)
+        self.aux_ctc_weight: Final[float] = float(config.aux_ctc_weight)
+
+        gpu_augment = GPUAudioAugmentation(config.audio_augment, rir_bank, noise_bank)
+        spec_augment = SpecAugment(
+            config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
+        )
+        self.featurizer = WaveformFeaturizer(
+            config.data.features,
+            spec_augment=spec_augment,
+            gpu_augment=gpu_augment,
+        )
+
+        vocab_size: int = int(sp.get_piece_size())
+        self.net: Final[FastConformerCTC] = FastConformerCTC(
+            config.model, vocab_size=vocab_size + 1, blank_id=self.blank_id
+        )
+        self.ctc_loss: Final[nn.CTCLoss] = nn.CTCLoss(
+            blank=self.blank_id, zero_infinity=True, reduction="mean"
+        )
+        self.examples: Final[ExamplesBuffer] = ExamplesBuffer(per_lang=2)
+        self._val_examples = WorstValExamplesCollector(max_examples=50)
+
+        self.save_hyperparameters(ignore=["sp", "rir_bank", "noise_bank"])
+
+        self._val_texts_pred: list[str] = []
+        self._val_texts_ref: list[str] = []
+        self._val_langs: list[str] = []
+
+    def on_fit_start(self) -> None:
+        self.featurizer = self.featurizer.to(self.device)
+
+    def _encode_batch(
+        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.featurizer.set_current_epoch(self.current_epoch)
+        return cast(tuple[torch.Tensor, torch.Tensor], self.featurizer(audio, audio_lengths))
 
     def forward(self, feats: torch.Tensor, feat_lengths: torch.Tensor) -> torch.Tensor:
         out = self.net(feats, feat_lengths)
         return cast(torch.Tensor, out.log_probs)
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
-        optimizer_config = self.config.optimizer
-        d_model = self.config.model.encoder.d_model
-        warmup_steps = optimizer_config.warmup_steps
+        opt_cfg = self.config.optimizer
+        d_model = int(self.config.model.encoder.d_model)
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = int(total_steps * opt_cfg.warmup_ratio)
 
         return configure_adamw_noam(
             self,
-            learning_rate=optimizer_config.learning_rate,
-            betas=optimizer_config.betas,
-            epsilon=optimizer_config.epsilon,
-            weight_decay=optimizer_config.weight_decay,
-            warmup_steps=warmup_steps,
-            d_model=int(d_model),
+            lr=opt_cfg.lr,
+            betas=opt_cfg.betas,
+            epsilon=1e-8,
+            weight_decay=getattr(opt_cfg, "weight_decay", 0.01),
+            warmup_steps=max(1, warmup_steps),
+            d_model=d_model,
         )
 
-    def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor:
-        feats = batch["features"]
-        feat_lens = batch["feature_lengths"]
+    def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor | None:
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lens = batch["target_lengths"]
+        target_lengths = batch["target_length"]
 
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
         out = self.net(feats, feat_lens)
-        if (out.out_lengths < target_lens).any():
-            raise RuntimeError("CTC input length < target length")
+
+        log_probs = cast(torch.Tensor, out.log_probs)
+        aux_log_probs = cast(torch.Tensor, out.aux_log_probs)
+        if aux_log_probs is None:
+            aux_log_probs = torch.empty(0, device=self.device)
+
+        time_steps = int(log_probs.size(1))
+        ctc_in_lens = out.out_lengths.clamp(max=time_steps)
+
+        if (ctc_in_lens < target_lengths).any():
+            skipped = int((ctc_in_lens < target_lengths).sum().item())
+            logger.warning(
+                "CTC input length < target length for {} utterances after augmentation; "
+                "skipping batch.",
+                skipped,
+            )
+            return None
 
         losses = compute_ctc_losses(
-            log_probs=out.log_probs,
-            out_lengths=out.out_lengths,
-            aux_log_probs=out.aux_log_probs,
+            log_probs=log_probs,
+            out_lengths=ctc_in_lens,
+            aux_log_probs=aux_log_probs,
             targets=targets,
-            target_lengths=target_lens,
+            target_lengths=target_lengths,
             blank_id=self.blank_id,
-            lsm_weight=self.config.ctc_label_smoothing,
-            aux_weight=self.config.aux_ctc_weight,
+            lsm_weight=self.ctc_label_smoothing,
+            aux_weight=self.aux_ctc_weight,
         )
 
-        self.log_dict(
-            {
-                "train/loss": losses.total,
-                "train/loss_main": losses.main,
-                "train/loss_aux": losses.aux,
-            },
+        self.log(
+            "train/loss",
+            losses.total,
             prog_bar=True,
             on_step=True,
             on_epoch=True,
-            batch_size=feats.size(0),
+            batch_size=audio.size(0),
         )
-        if not torch.isfinite(losses.total):
-            logger.error(f"NaN loss at step={self.global_step}")
-            raise RuntimeError("NaN/Inf in loss")
         return losses.total
 
-    def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
-        feats = batch["features"]
-        feat_lens = batch["feature_lengths"]
+    def validation_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> None:
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lens = batch["target_lengths"]
-        texts = batch["text"]
-        langs = batch.get("language")
+        target_lengths = batch["target_length"]
 
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
         out = self.net(feats, feat_lens)
-        lp_t = out.log_probs.transpose(0, 1)
-        loss = self.ctc_loss(lp_t, targets, out.out_lengths, target_lens)
 
-        decoded = greedy_ctc_decode(out.log_probs, out.out_lengths, blank_id=self.blank_id)
-        preds = ctc_ids_to_texts_spm(self.sp, decoded)
-        m = wer_cer_by_lang(texts, preds, langs)
+        log_probs_btv = cast(torch.Tensor, out.log_probs).float()
+        time_steps = int(log_probs_btv.size(1))
+        if time_steps == 0:
+            return
 
-        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=len(texts))
-        self.log_dict(
-            {f"val/{k}": v for k, v in m.items()},
+        ctc_in_lens = out.out_lengths.clamp(max=time_steps)
+        loss = self.ctc_loss(log_probs_btv.transpose(0, 1), targets, ctc_in_lens, target_lengths)
+        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=audio.size(0))
+
+        greedy_preds = greedy_ctc_decode(
+            log_probs_btv.detach(), ctc_in_lens, blank_id=self.blank_id
+        )
+        self._val_examples.accumulate_blank_stats(log_probs_btv, ctc_in_lens, self.blank_id)
+        texts_pred = ctc_ids_to_texts_spm(self.sp, greedy_preds)
+        raw_texts = batch.get("text")
+        texts_ref: list[str] = raw_texts if isinstance(raw_texts, list) else []
+        langs = batch.get("language", ["unknown"] * len(texts_pred))
+        datasets = batch.get("dataset", ["unknown"] * len(texts_pred))
+
+        self._val_texts_pred.extend(texts_pred)
+        self._val_texts_ref.extend(texts_ref)
+        self._val_langs.extend(langs)
+
+        for index, (ref, hyp, lang) in enumerate(zip(texts_ref, texts_pred, langs, strict=True)):
+            self.examples.add(lang, ref, hyp)
+            self._val_examples.add(
+                dataset=datasets[index] if index < len(datasets) else "unknown",
+                language=lang,
+                reference=ref,
+                hypothesis=hyp,
+                audio=audio[index, : int(audio_lengths[index].item())],
+            )
+
+    def on_validation_epoch_start(self) -> None:
+        self._val_texts_pred.clear()
+        self._val_texts_ref.clear()
+        self._val_langs.clear()
+        self._val_examples.reset()
+
+    def on_validation_epoch_end(self) -> None:
+        from SpeechToText.models.common import wer_cer_by_lang
+
+        if not self._val_texts_ref:
+            self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
+            return
+
+        metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
+
+        for name, value in metrics.items():
+            self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
+
+        self.log(
+            "val/blank_fraction",
+            self._val_examples.blank_fraction(),
             prog_bar=True,
             on_epoch=True,
-            batch_size=len(texts),
         )
-        for lang, ref, hyp in zip((langs or ["unknown"] * len(texts)), texts, preds, strict=True):
-            self.examples.add(lang, ref, hyp)
 
-        return {"wer": m["wer/overall"], "cer": m["cer/overall"]}
+        log_wandb_worst_val_examples(
+            self.logger,
+            self._val_examples.worst_first(),
+            sample_rate=int(self.config.data.features.sample_rate),
+            epoch=int(self.current_epoch),
+        )
+
+        examples = self.examples.pop_all()
+        for lang, pairs in examples.items():
+            if pairs:
+                ref, hyp = pairs[0]
+                logger.info(f"[VAL][{lang}] REF: {ref}")
+                logger.info(f"[VAL][{lang}] HYP: {hyp}")

@@ -9,6 +9,8 @@ from SpeechToText.models.common import ctc_loss_with_label_smoothing
 
 @dataclass(frozen=True)
 class CTCAttnLosses:
+    """Loss breakdown for the CTC + attention hybrid model."""
+
     total: torch.Tensor
     ctc_main: torch.Tensor
     ctc_aux: torch.Tensor
@@ -17,24 +19,47 @@ class CTCAttnLosses:
 
 def compute_ctc_attn_losses(
     *,
-    ctc_log_probs: torch.Tensor,  # [B,T,V_ctc]
-    out_lengths: torch.Tensor,  # [B]
-    aux_log_probs: torch.Tensor,  # [Naux,B,T,V_ctc] or empty
-    targets: torch.Tensor,  # concat 1D
-    target_lengths: torch.Tensor,  # [B]
-    dec_log_probs: torch.Tensor,  # [B,U,V_dec]
-    dec_out: torch.Tensor,  # [B,U]
+    ctc_log_probs: torch.Tensor,
+    out_lengths: torch.Tensor,
+    aux_log_probs: torch.Tensor,
+    targets: torch.Tensor,
+    target_lengths: torch.Tensor,
+    dec_log_probs: torch.Tensor,
+    dec_out: torch.Tensor,
     blank_id: int,
     ctc_label_smoothing: float,
     aux_ctc_weight: float,
     ctc_weight: float,
     autocast_device_type: str,
-    attn_loss_fn: torch.nn.Module,  # NLLLoss
+    attn_loss_fn: torch.nn.Module,
 ) -> CTCAttnLosses:
-    ctc_lp_t = ctc_log_probs.transpose(0, 1)
+    """Compute CTC, auxiliary CTC, and attention decoder losses.
+
+    Args:
+        ctc_log_probs: Main CTC log-probabilities with shape ``[batch, time, vocab]``.
+        out_lengths: Valid encoder steps per utterance with shape ``[batch]``.
+        aux_log_probs: Auxiliary CTC log-probabilities or an empty tensor.
+        targets: Concatenated target token ids.
+        target_lengths: Target lengths with shape ``[batch]``.
+        dec_log_probs: Decoder log-probabilities with shape ``[batch, label, vocab]``.
+        dec_out: Decoder target ids with shape ``[batch, label]``.
+        blank_id: Index of the CTC blank symbol.
+        ctc_label_smoothing: Label-smoothing weight for CTC heads.
+        aux_ctc_weight: Weight applied to auxiliary CTC losses.
+        ctc_weight: Interpolation weight between CTC and attention losses.
+        autocast_device_type: Device type string used for mixed precision.
+        attn_loss_fn: Negative log-likelihood loss for the decoder head.
+
+    Returns:
+        Combined total, CTC, auxiliary CTC, and attention loss tensors.
+    """
+    ctc_log_probs_time_major = ctc_log_probs.transpose(0, 1)
+
+    max_time = ctc_log_probs_time_major.size(0)
+    out_lengths = out_lengths.clamp(max=max_time)
 
     main_ctc = ctc_loss_with_label_smoothing(
-        log_probs_t=ctc_lp_t,
+        log_probs_t=ctc_log_probs_time_major,
         targets=targets,
         input_lengths=out_lengths,
         target_lengths=target_lengths,
@@ -46,10 +71,10 @@ def compute_ctc_attn_losses(
 
     if aux_ctc_weight > 0.0 and aux_log_probs.numel() > 0:
         aux_losses: list[torch.Tensor] = []
-        for i in range(aux_log_probs.size(0)):
+        for head_index in range(aux_log_probs.size(0)):
             aux_losses.append(
                 ctc_loss_with_label_smoothing(
-                    log_probs_t=aux_log_probs[i].transpose(0, 1),
+                    log_probs_t=aux_log_probs[head_index].transpose(0, 1),
                     targets=targets,
                     input_lengths=out_lengths,
                     target_lengths=target_lengths,
@@ -63,9 +88,12 @@ def compute_ctc_attn_losses(
     else:
         aux_ctc = torch.tensor(0.0, device=main_ctc.device)
 
-    b, u, v = dec_log_probs.shape
-    attn = attn_loss_fn(dec_log_probs.reshape(b * u, v), dec_out.reshape(b * u))
+    batch_size, label_steps, vocab_size = dec_log_probs.shape
+    attn = attn_loss_fn(
+        dec_log_probs.reshape(batch_size * label_steps, vocab_size),
+        dec_out.reshape(batch_size * label_steps),
+    )
 
-    lam = float(ctc_weight)
-    total = lam * main_ctc + (1.0 - lam) * attn + float(aux_ctc_weight) * aux_ctc
+    ctc_mix = float(ctc_weight)
+    total = ctc_mix * main_ctc + (1.0 - ctc_mix) * attn + float(aux_ctc_weight) * aux_ctc
     return CTCAttnLosses(total=total, ctc_main=main_ctc, ctc_aux=aux_ctc, attn=attn)

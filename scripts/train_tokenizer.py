@@ -6,6 +6,7 @@ from pathlib import Path
 
 import sentencepiece as spm
 import tyro
+from loguru import logger
 
 
 @dataclass(slots=True)
@@ -13,12 +14,13 @@ class TokenizerConfig:
     manifests: tuple[str, ...]
     corpus_out: str
     model_prefix: str
-    vocab_size: int = 2000
+    vocab_size: int = 4096
     model_type: str = "unigram"
     character_coverage: float = 1.0
     max_lines: int | None = None
     shuffle: bool = False
     seed: int = 42
+    control_symbols: tuple[str, ...] = ("<pad>", "<s>", "</s>")
 
 
 def _build_corpus(manifests: tuple[str, ...], corpus_out: Path, max_lines: int | None) -> int:
@@ -55,13 +57,16 @@ def main(cfg: TokenizerConfig) -> None:
         f"--model_prefix={out_prefix} "
         f"--vocab_size={cfg.vocab_size} "
         f"--model_type={cfg.model_type} "
-        f"--character_coverage={cfg.character_coverage}"
+        f"--character_coverage={cfg.character_coverage} "
+        f"--control_symbols={','.join(cfg.control_symbols)} "
+        f"--bos_id=1 --eos_id=2 --pad_id=3 --unk_id=0"
     )
+
     spm.SentencePieceTrainer.Train(args)
 
-    print(f"Wrote corpus lines: {n}")
-    print(f"Saved: {out_prefix}.model")
-    print(f"Saved: {out_prefix}.vocab")
+    logger.info("Wrote corpus lines: {}", n)
+    logger.info("Saved: {}.model", out_prefix)
+    logger.info("Saved: {}.vocab", out_prefix)
 
 
 if __name__ == "__main__":

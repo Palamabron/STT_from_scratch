@@ -23,6 +23,8 @@ run:
   max_failures: 10000
   sample_per_dataset: null
 
+# Dataset entries that share the same `name` are merged into one bucket.
+# `samples` is the target size for the whole bucket (not per source row).
 datasets:
   train:
     - name: "bigos_v2_train"
@@ -96,12 +98,13 @@ datasets:
       use_streaming: true
 
   val:
+    # bigos_pl_clean_val: two HF sources merged into one bucket (HF caps at ~1345 unique)
     - name: "bigos_pl_clean_val"
       hf_id: "amu-cai/pl-asr-bigos-v2"
       config_name: "pwr-azon_read-20"
       split: "validation"
       lang: "pl"
-      samples: 2500
+      samples: 1345
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -111,27 +114,28 @@ datasets:
       config_name: "fair-mls-20"
       split: "validation"
       lang: "pl"
-      samples: 2500
+      samples: 1345
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
 
+    # Uses HF train split intentionally (spontaneous speech; source has ~357 utterances)
     - name: "bigos_pl_noisy_val"
       hf_id: "amu-cai/pl-asr-bigos-v2"
       config_name: "pwr-azon_spont-20"
       split: "train"
       lang: "pl"
-      samples: 3500
+      samples: 489
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
 
-    - name: "bigos_pl_noisy_val"
+    - name: "bigos_pl_noisy_val_cv15"
       hf_id: "amu-cai/pl-asr-bigos-v2"
       config_name: "mozilla-common_voice_15-23"
       split: "validation"
       lang: "pl"
-      samples: 3500
+      samples: 1500
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -171,7 +175,7 @@ datasets:
       config_name: "pl_pl"
       split: "validation"
       lang: "pl"
-      samples: 750
+      samples: 350
       text_col: "transcription"
       audio_col: "audio"
       use_streaming: false
@@ -181,7 +185,7 @@ datasets:
       config_name: "en_us"
       split: "validation"
       lang: "en"
-      samples: 750
+      samples: 350
       text_col: "transcription"
       audio_col: "audio"
       use_streaming: false
@@ -191,7 +195,26 @@ datasets:
       config_name: "ul-spokes_mix_luz-18"
       split: "validation"
       lang: "pl"
-      samples: 1500
+      samples: 500
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
+
+# Fast-Conformer training defaults (CLI overrides via --data.filter.* / --data.loader.*)
+training:
+  filter:
+    subsampling_factor: 8
+    max_duration: 16.0
+  loader:
+    train_max_batch_duration: 1200
+    train_max_batch_size: 1024
+  augment:
+    noise_bank: "data/augment/noise_bank.pt"
+    rir_bank: "data/augment/rir_bank.pt"
+  tokenizer:
+    model: "models/spm_unigram_4k_trainval.model"
+    vocab_size: 4096
+    model_type: unigram
+  # Expected totals after rebuild_final_manifests.py:
+  #   train ≈ 106200 (50200 pl + 56000 en)
+  #   val   ≈ 11034  (6184 pl + 4850 en), val-only buckets, zero train overlap

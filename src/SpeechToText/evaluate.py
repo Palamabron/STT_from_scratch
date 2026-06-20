@@ -4,7 +4,7 @@ import json
 import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import torch
@@ -16,9 +16,8 @@ from sentencepiece import SentencePieceProcessor
 from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
-from SpeechToText.dataset import DataConfig
+from SpeechToText.dataset import DataConfig, FeatureConfig, ManifestPaths
 from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
-from SpeechToText.utils.audio import build_feature_transforms, extract_features
 from SpeechToText.utils.decoding import (
     collect_probs_for_beam,
     decode_batch_with_beam,
@@ -45,7 +44,7 @@ class EvaluateConfig:
     audio_key: str = "audio_filepath"
     text_key: str = "text"
     lang_key: str = "language"
-    output_csv: str = "evaluation_results.csv"
+    output_csv: str = "results/eval/evaluation_results.csv"
     batch_size: int = 64
     num_workers: int | None = None
 
@@ -79,6 +78,15 @@ def init_num_workers(num_workers: int | None) -> int:
         return max(1, mp.cpu_count() - 1)
     except NotImplementedError:
         return 1
+
+
+def load_audio(path: str, sample_rate: int) -> torch.Tensor:
+    wav, sr = torchaudio.load(path)
+    if wav.dim() == 2 and wav.size(0) > 1:
+        wav = wav.mean(dim=0, keepdim=True)
+    if sr != sample_rate:
+        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+    return cast(torch.Tensor, wav.squeeze(0))
 
 
 def build_decoders(
@@ -124,9 +132,9 @@ def create_pool(decode_types: tuple[str, ...], num_workers: int) -> mp.pool.Pool
     return ctx.Pool(processes=num_workers)
 
 
-def process_feature_batch(
-    feature_tensors: list[torch.Tensor],
-    feature_lengths: list[int],
+def process_audio_batch(
+    audio_tensors: list[torch.Tensor],
+    audio_lengths: list[int],
     refs_batch: list[str],
     langs_batch: list[str],
     config: EvaluateConfig,
@@ -140,16 +148,17 @@ def process_feature_batch(
     metrics: dict[tuple[str, int | None, float | None, float | None, str], dict[str, float]],
     blank_id: int,
 ) -> None:
-    if not feature_tensors:
+    if not audio_tensors:
         return
 
-    padded_features = pad_sequence(feature_tensors, batch_first=True).to(device)
-    lengths_tensor = torch.tensor(feature_lengths, device=device, dtype=torch.long)
+    padded_audio = pad_sequence(audio_tensors, batch_first=True).to(device)
+    lengths_tensor = torch.tensor(audio_lengths, device=device, dtype=torch.long)
 
     with torch.inference_mode():
-        outputs = model(padded_features, lengths_tensor)
-        batch_log_probs = outputs[0]
-        batch_out_lengths = outputs[1]
+        feats, feat_lens = model.featurizer(padded_audio, lengths_tensor)
+        out = model(feats, feat_lens, decoder_input=None)
+        batch_log_probs = out.ctc_log_probs
+        batch_out_lengths = out.out_lengths
 
     if "greedy" in config.decode_types:
         decode_batch_with_greedy(
@@ -185,8 +194,8 @@ def process_feature_batch(
         metrics=metrics,
     )
 
-    feature_tensors.clear()
-    feature_lengths.clear()
+    audio_tensors.clear()
+    audio_lengths.clear()
     refs_batch.clear()
     langs_batch.clear()
 
@@ -197,9 +206,7 @@ def evaluate_split(
     config: EvaluateConfig,
     device: torch.device,
     model: LitFastConformerCTCAttention,
-    data_config: DataConfig,
-    mel_spec: torchaudio.transforms.MelSpectrogram,
-    amplitude_to_db: torchaudio.transforms.AmplitudeToDB,
+    sample_rate: int,
     tokenizer: SentencePieceProcessor,
     labels_for_pyctc: list[str],
     decoder_ctc: Any | None,
@@ -217,8 +224,8 @@ def evaluate_split(
     pool = create_pool(config.decode_types, config.num_workers or 0)
 
     try:
-        feature_tensors: list[torch.Tensor] = []
-        feature_lengths: list[int] = []
+        audio_tensors: list[torch.Tensor] = []
+        audio_lengths: list[int] = []
         refs_batch: list[str] = []
         langs_batch: list[str] = []
 
@@ -233,23 +240,16 @@ def evaluate_split(
             text = example[config.text_key]
             lang = example.get(config.lang_key, "unknown")
 
-            features, feat_len = extract_features(
-                audio_path=audio_path,
-                data_config=data_config,
-                mel_spec=mel_spec,
-                amplitude_to_db=amplitude_to_db,
-                device=device,
-            )
-
-            feature_tensors.append(features)
-            feature_lengths.append(feat_len)
+            audio = load_audio(str(audio_path), sample_rate)
+            audio_tensors.append(audio)
+            audio_lengths.append(int(audio.numel()))
             refs_batch.append(text)
             langs_batch.append(lang)
 
-            if len(feature_tensors) >= config.batch_size:
-                process_feature_batch(
-                    feature_tensors=feature_tensors,
-                    feature_lengths=feature_lengths,
+            if len(audio_tensors) >= config.batch_size:
+                process_audio_batch(
+                    audio_tensors=audio_tensors,
+                    audio_lengths=audio_lengths,
                     refs_batch=refs_batch,
                     langs_batch=langs_batch,
                     config=config,
@@ -264,10 +264,10 @@ def evaluate_split(
                     blank_id=blank_id,
                 )
 
-        if feature_tensors:
-            process_feature_batch(
-                feature_tensors=feature_tensors,
-                feature_lengths=feature_lengths,
+        if audio_tensors:
+            process_audio_batch(
+                audio_tensors=audio_tensors,
+                audio_lengths=audio_lengths,
                 refs_batch=refs_batch,
                 langs_batch=langs_batch,
                 config=config,
@@ -343,8 +343,8 @@ def main(config: EvaluateConfig) -> None:
 
     tokenizer = SentencePieceProcessor()
     tokenizer.load(config.tokenizer_model)
-    vocab_size = tokenizer.get_piece_size()
-    logger.info(f"Loaded SentencePiece tokenizer with vocab_size={vocab_size}")
+    sp_vocab = tokenizer.get_piece_size()
+    logger.info(f"Loaded SentencePiece tokenizer with vocab_size={sp_vocab}")
 
     logger.info(f"Loading checkpoint from {config.checkpoint}")
     model = LitFastConformerCTCAttention.load_from_checkpoint(
@@ -355,17 +355,13 @@ def main(config: EvaluateConfig) -> None:
     model.eval()
     model.to(device)
 
-    data_config = DataConfig(
-        train_manifest=config.train_manifest,
-        val_manifest=config.val_manifest,
+    _ = DataConfig(
+        manifests=ManifestPaths(train=config.train_manifest, val=config.val_manifest),
         tokenizer_model=config.tokenizer_model,
-        sample_rate=config.sample_rate,
+        features=FeatureConfig(sample_rate=config.sample_rate),
     )
-    mel_spec, amplitude_to_db = build_feature_transforms(data_config)
-    mel_spec.to(device)
-    amplitude_to_db.to(device)
 
-    labels_for_pyctc = [""] + [tokenizer.id_to_piece(i) for i in range(vocab_size)]
+    labels_for_pyctc = [""] + [tokenizer.id_to_piece(i) for i in range(sp_vocab)]
     expected_ctc_dim = len(labels_for_pyctc)
     logger.info(f"CTC dim (expected) = {expected_ctc_dim}")
 
@@ -395,9 +391,7 @@ def main(config: EvaluateConfig) -> None:
                 config=config,
                 device=device,
                 model=model,
-                data_config=data_config,
-                mel_spec=mel_spec,
-                amplitude_to_db=amplitude_to_db,
+                sample_rate=config.sample_rate,
                 tokenizer=tokenizer,
                 labels_for_pyctc=labels_for_pyctc,
                 decoder_ctc=decoder_ctc,

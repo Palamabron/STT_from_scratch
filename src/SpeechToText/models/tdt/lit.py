@@ -8,9 +8,15 @@ from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
+from SpeechToText.augmentation import SpecAugment
+from SpeechToText.features import WaveformFeaturizer
 from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang
 from SpeechToText.models.common.optimizers import configure_adamw_noam
 from SpeechToText.models.common.rnnt import greedy_rnnt_path_decode_one, rnnt_loss_mean
+from SpeechToText.models.common.validation_logging import (
+    WorstValExamplesCollector,
+    log_wandb_worst_val_examples,
+)
 from SpeechToText.models.tdt.model import FastConformerTDT
 from SpeechToText.models.typing import TDTOutput, TrainBatch, ValBatch
 
@@ -32,17 +38,40 @@ class LitFastConformerTDT(pl.LightningModule):
 
         model_config = cast(Any, config.model)
 
-        # Konwencja w repo: blank=0, token_id = sp_id+1 => vocab = sp_vocab + 1
         self.blank_id = int(config.blank_id)
         model_config.blank_id = int(self.blank_id)
-
         model_config.decoder.vocab_size = int(vocab_size)
         model_config.joint.vocab_size = int(vocab_size)
+        model_config.decoder.d_model = int(model_config.encoder.d_model)
+        model_config.joint.enc_d = int(model_config.encoder.d_model)
+        model_config.joint.pred_d = int(model_config.encoder.d_model)
+
+        feat_cfg = config.data.features
+        self.sample_rate = feat_cfg.sample_rate
+
+        spec_augment = SpecAugment(
+            config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
+        )
+        self.featurizer = WaveformFeaturizer(
+            config.data.features,
+            spec_augment=spec_augment,
+        )
 
         self.net = FastConformerTDT(model_config)
-
         self.examples = ExamplesBuffer(per_lang=2)
+        self._val_examples = WorstValExamplesCollector(max_examples=50)
         self.save_hyperparameters(ignore=["sp"])
+
+    def on_fit_start(self) -> None:
+        self.featurizer = self.featurizer.to(self.device)
+
+    def _encode_batch(
+        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        self.featurizer.set_current_epoch(self.current_epoch)
+        return cast(
+            tuple[torch.Tensor, torch.Tensor], self.featurizer(audio.to(self.device), audio_lengths)
+        )
 
     def forward(
         self,
@@ -62,14 +91,15 @@ class LitFastConformerTDT(pl.LightningModule):
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
         d_model = int(self.config.model.encoder.d_model)
+        total_steps = self.trainer.estimated_stepping_batches
+        warmup_steps = int(total_steps * opt_cfg.warmup_ratio)
 
         return configure_adamw_noam(
             self,
-            learning_rate=opt_cfg.learning_rate,
+            lr=opt_cfg.lr,
             betas=opt_cfg.betas,
-            epsilon=opt_cfg.epsilon,
             weight_decay=opt_cfg.weight_decay,
-            warmup_steps=int(opt_cfg.warmup_steps),
+            warmup_steps=max(1, warmup_steps),
             d_model=d_model,
         )
 
@@ -91,13 +121,14 @@ class LitFastConformerTDT(pl.LightningModule):
         )
 
     def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor:
-        feats = batch["features"]
-        feat_lens = batch["feature_lengths"]
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lens = batch["target_lengths"]
+        target_lengths = batch["target_length"]
 
-        out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lens)
-        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lens)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
+        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lengths)
 
         self.log(
             "train/loss",
@@ -106,22 +137,23 @@ class LitFastConformerTDT(pl.LightningModule):
             on_step=True,
             on_epoch=True,
             sync_dist=False,
-            batch_size=feats.size(0),
+            batch_size=audio.size(0),
         )
         return loss
 
     def validation_step(self, batch: ValBatch, batch_idx: int) -> dict[str, float]:
-        feats = batch["features"]
-        feat_lens = batch["feature_lengths"]
+        audio = batch["audio"]
+        audio_lengths = batch["audio_length"]
         targets = batch["targets"]
-        target_lens = batch["target_lengths"]
+        target_lengths = batch["target_length"]
         texts = batch["text"]
         langs = batch.get("language")
 
-        out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lens)
-        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lens)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
+        loss = self._rnnt_loss(out.log_probs, out.out_lengths, targets, target_lengths)
 
-        bs = feats.size(0)
+        bs = audio.size(0)
         self.log("val/loss", loss, prog_bar=True, on_epoch=True, sync_dist=False, batch_size=bs)
 
         pred_texts: list[str] = []
@@ -147,9 +179,29 @@ class LitFastConformerTDT(pl.LightningModule):
         for lang, ref, hyp in zip((langs or ["unknown"] * bs), texts, pred_texts, strict=True):
             self.examples.add(lang, ref, hyp)
 
+        datasets = batch.get("dataset", ["unknown"] * bs)
+        for index in range(bs):
+            self._val_examples.add(
+                dataset=datasets[index] if index < len(datasets) else "unknown",
+                language=(langs or ["unknown"] * bs)[index],
+                reference=texts[index],
+                hypothesis=pred_texts[index],
+                audio=audio[index, : int(audio_lengths[index].item())],
+            )
+
         return {"wer": m["wer/overall"], "cer": m["cer/overall"]}
 
+    def on_validation_epoch_start(self) -> None:
+        self._val_examples.reset()
+
     def on_validation_epoch_end(self) -> None:
+        log_wandb_worst_val_examples(
+            self.logger,
+            self._val_examples.worst_first(),
+            sample_rate=int(self.sample_rate),
+            epoch=int(self.current_epoch),
+        )
+
         for lang, pairs in self.examples.pop_all().items():
             if not pairs:
                 continue

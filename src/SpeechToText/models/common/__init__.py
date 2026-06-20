@@ -1,3 +1,4 @@
+from .callbacks import DatasetEpochSync
 from .config import BaseOptimizerConfig, BaseTrainConfig, PrecisionType
 from .decode_ctc import ctc_ids_to_texts_spm, greedy_ctc_decode
 from .examples_buffer import ExamplesBuffer
@@ -9,6 +10,7 @@ __all__ = [
     "PrecisionType",
     "BaseOptimizerConfig",
     "BaseTrainConfig",
+    "DatasetEpochSync",
     "greedy_ctc_decode",
     "ctc_ids_to_texts_spm",
     "wer_cer_by_lang",

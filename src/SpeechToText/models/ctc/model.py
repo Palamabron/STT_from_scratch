@@ -36,12 +36,27 @@ class FastConformerCTC(nn.Module):
         )
 
     def forward(self, feats: torch.Tensor, feat_lengths: torch.Tensor) -> CTCOutput:
-        enc, out_lengths = self.encoder(feats, feat_lengths)
+        if self.aux_layers:
+            enc, out_lengths, layer_outs = self.encoder(
+                feats, feat_lengths, return_layer_outputs=True
+            )
+        else:
+            enc, out_lengths = self.encoder(feats, feat_lengths, return_layer_outputs=False)
+            layer_outs = []
+
         logits = self.proj(enc)
         log_probs = F.log_softmax(logits, dim=-1)
-        aux = torch.empty(
-            (0, logits.size(0), logits.size(1), logits.size(2)),
-            device=logits.device,
-            dtype=logits.dtype,
-        )
-        return CTCOutput(log_probs=log_probs, out_lengths=out_lengths, aux_log_probs=aux)
+
+        aux_log_probs: torch.Tensor
+        if self.aux_layers:
+            aux_encs = [layer_outs[i] for i in self.aux_layers]
+
+            aux_logits = torch.stack(
+                [proj(h) for proj, h in zip(self.aux_projs, aux_encs, strict=True)],
+                dim=0,
+            )
+            aux_log_probs = F.log_softmax(aux_logits, dim=-1)
+        else:
+            aux_log_probs = torch.empty(0, device=log_probs.device, dtype=log_probs.dtype)
+
+        return CTCOutput(log_probs=log_probs, out_lengths=out_lengths, aux_log_probs=aux_log_probs)

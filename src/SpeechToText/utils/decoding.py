@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from sentencepiece import SentencePieceProcessor
 
-from SpeechToText.models.ctc.train import greedy_decoder
+from SpeechToText.models.common import greedy_ctc_decode
 
 MetricKey: TypeAlias = tuple[str, int | None, float | None, float | None, str]
 MetricState: TypeAlias = dict[str, float]
@@ -46,10 +46,10 @@ def greedy_decode_single(
     blank_id: int,
 ) -> str:
     """Greedy CTC decoding for a single sequence."""
-    truncated = log_probs[:out_len].unsqueeze(0)  # (1, T, V)
+    truncated = log_probs[:out_len].unsqueeze(0)
     out_lengths = torch.tensor([out_len], device=truncated.device, dtype=torch.long)
 
-    decoded_ids_batch = greedy_decoder(truncated, out_lengths, blank_id=blank_id)
+    decoded_ids_batch = greedy_ctc_decode(truncated, out_lengths, blank_id=blank_id)
     token_ids = decoded_ids_batch[0]
 
     sp_ids = [idx - 1 for idx in token_ids if idx > 0]
@@ -109,7 +109,7 @@ def collect_probs_for_beam(
     batch_size = batch_log_probs.size(0)
     for i in range(batch_size):
         out_len = int(batch_lengths[i].item())
-        logp = batch_log_probs[i, :out_len, :vocab_size_with_blank]  # (T, V)
+        logp = batch_log_probs[i, :out_len, :vocab_size_with_blank]
         probs = torch.exp(logp).detach().cpu().to(torch.float32).numpy()
         probs_list.append(cast(np.ndarray, probs))
         refs_list.append(str(batch_refs[i]))
