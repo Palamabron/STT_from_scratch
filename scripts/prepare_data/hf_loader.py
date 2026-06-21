@@ -133,7 +133,7 @@ def load_hf_dataset(dataset_spec: DatasetSpec, hf_token: str | None, shuffle_see
         )
 
     os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "600")
-    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "60")
+    os.environ.setdefault("HF_HUB_ETAG_TIMEOUT", "120")
 
     download_config = DownloadConfig(
         resume_download=True,

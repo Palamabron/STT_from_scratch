@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import heapq
+import random
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 from jiwer import cer as jiwer_cer
+
+if TYPE_CHECKING:
+    from lightning.pytorch.loggers import WandbLogger
 
 
 def accumulate_blank_stats(
@@ -92,37 +97,73 @@ class WorstValExamplesCollector:
         return [record for _, _, record in sorted(self._heap, key=lambda x: (-x[0], x[1]))]
 
 
+def _resolve_wandb_logger(logger: object | None) -> WandbLogger | None:
+    try:
+        from lightning.pytorch.loggers import WandbLogger
+    except ImportError:
+        return None
+
+    if logger is None:
+        return None
+    if isinstance(logger, WandbLogger):
+        return logger
+    if isinstance(logger, (list, tuple)):
+        for item in logger:
+            if isinstance(item, WandbLogger):
+                return item
+    return None
+
+
+def _build_worst_examples_rows(
+    examples: list[ValUtteranceRecord],
+    *,
+    epoch: int,
+    sample_rate: int,
+) -> tuple[list[str], list[list[object]]]:
+    import wandb
+
+    columns = ["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"]
+    rows: list[list[object]] = []
+    for record in examples:
+        rows.append(
+            [
+                epoch,
+                record.dataset,
+                record.language,
+                record.reference,
+                record.hypothesis,
+                record.cer,
+                wandb.Audio(record.audio.numpy(), sample_rate=sample_rate),
+            ],
+        )
+    return columns, rows
+
+
 def log_wandb_worst_val_examples(
     logger: object | None,
     examples: list[ValUtteranceRecord],
     *,
     sample_rate: int,
     epoch: int,
+    step: int | None = None,
     key: str = "val/worst_examples",
 ) -> None:
-    if logger is None or not examples:
+    if not examples:
         return
 
+    wandb_logger = _resolve_wandb_logger(logger)
+    if wandb_logger is None:
+        return
+
+    # wandb#11112: fixed global random seed (Lightning seed_everything) can yield empty tables in UI.
+    py_random_state = random.getstate()
     try:
-        import wandb
-        from lightning.pytorch.loggers import WandbLogger
-    except ImportError:
-        return
-
-    if not isinstance(logger, WandbLogger):
-        return
-
-    table = wandb.Table(
-        columns=["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"],
-    )
-    for record in examples:
-        table.add_data(
-            epoch,
-            record.dataset,
-            record.language,
-            record.reference,
-            record.hypothesis,
-            record.cer,
-            wandb.Audio(record.audio.numpy(), sample_rate=sample_rate),
+        random.seed()
+        columns, rows = _build_worst_examples_rows(
+            examples,
+            epoch=epoch,
+            sample_rate=sample_rate,
         )
-    logger.experiment.log({key: table})
+        wandb_logger.log_table(key=key, columns=columns, data=rows, step=step)
+    finally:
+        random.setstate(py_random_state)

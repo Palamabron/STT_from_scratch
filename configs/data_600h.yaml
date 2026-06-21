@@ -1,3 +1,5 @@
+# Phase-1 data profile: ~600 h per language (~1200 h train total).
+# Incremental download: make prepare-data-600h (resume via skip_existing + .state.json).
 paths:
   root_dir: "."
   data_dir: "data"
@@ -32,7 +34,7 @@ datasets:
       config_name: "pwr-azon_read-20"
       split: "train"
       lang: "pl"
-      samples: 28200
+      samples: 100000
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -42,7 +44,7 @@ datasets:
       config_name: "fair-mls-20"
       split: "train"
       lang: "pl"
-      samples: 28200
+      samples: 100000
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -52,7 +54,17 @@ datasets:
       config_name: "mozilla-common_voice_15-23"
       split: "train"
       lang: "pl"
-      samples: 28200
+      samples: 100000
+      text_col: "ref_orig"
+      audio_col: "audio"
+      use_streaming: false
+
+    - name: "bigos_v2_train"
+      hf_id: "amu-cai/pl-asr-bigos-v2"
+      config_name: "pwr-azon_spont-20"
+      split: "train"
+      lang: "pl"
+      samples: 100000
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -62,17 +74,17 @@ datasets:
       config_name: "pl"
       split: "train"
       lang: "pl"
-      samples: 14000
+      samples: 26000
       text_col: "sentence"
       audio_col: "audio"
-      use_streaming: true
+      use_streaming: false
 
     - name: "mls_pl_train"
       hf_id: "facebook/multilingual_librispeech"
       config_name: "polish"
       split: "train"
       lang: "pl"
-      samples: 8000
+      samples: 25000
       text_col: "transcript"
       audio_col: "audio"
       use_streaming: true
@@ -82,8 +94,18 @@ datasets:
       config_name: "clean"
       split: "train.360"
       lang: "en"
-      samples: 38000
+      samples: 104000
       text_col: "text"
+      audio_col: "audio"
+      use_streaming: true
+
+    - name: "mls_en_train"
+      hf_id: "facebook/multilingual_librispeech"
+      config_name: "english"
+      split: "train"
+      lang: "en"
+      samples: 34000
+      text_col: "transcript"
       audio_col: "audio"
       use_streaming: true
 
@@ -92,13 +114,12 @@ datasets:
       config_name: "en"
       split: "train"
       lang: "en"
-      samples: 18000
+      samples: 30000
       text_col: "sentence"
       audio_col: "audio"
       use_streaming: true
 
   val:
-    # bigos_pl_clean_val: two HF sources merged into one bucket (HF caps at ~1345 unique)
     - name: "bigos_pl_clean_val"
       hf_id: "amu-cai/pl-asr-bigos-v2"
       config_name: "pwr-azon_read-20"
@@ -119,16 +140,7 @@ datasets:
       audio_col: "audio"
       use_streaming: false
 
-    # Uses HF train split intentionally (spontaneous speech; source has ~357 utterances)
-    - name: "bigos_pl_noisy_val"
-      hf_id: "amu-cai/pl-asr-bigos-v2"
-      config_name: "pwr-azon_spont-20"
-      split: "train"
-      lang: "pl"
-      samples: 489
-      text_col: "ref_orig"
-      audio_col: "audio"
-      use_streaming: false
+    # bigos_pl_noisy_val omitted: pwr-azon_spont-20 moved to bigos_v2_train (train/val overlap)
 
     - name: "bigos_pl_noisy_val_cv15"
       hf_id: "amu-cai/pl-asr-bigos-v2"
@@ -200,7 +212,6 @@ datasets:
       audio_col: "audio"
       use_streaming: false
 
-# Fast-Conformer training defaults (CLI overrides via --data.filter.* / --data.loader.*)
 training:
   filter:
     subsampling_factor: 8
@@ -218,5 +229,5 @@ training:
     vocab_size_2k: 2048
     model_type: unigram
   # Expected totals after rebuild_final_manifests.py:
-  #   train ≈ 106200 (50200 pl + 56000 en)
-  #   val   ≈ 11034  (6184 pl + 4850 en), val-only buckets, zero train overlap
+  #   train ≈ 319000 (151000 pl + 168000 en), ~600 h per language
+  #   val   ≈ 10545  (5695 pl + 4850 en), val-only buckets, zero train overlap

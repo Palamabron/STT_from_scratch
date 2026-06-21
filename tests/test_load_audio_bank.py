@@ -23,3 +23,18 @@ def test_load_audio_bank_empty_pt_returns_none(tmp_path: Path) -> None:
     torch.save(tuple(), str(bank_path))
 
     assert load_audio_bank(str(bank_path), sample_rate=16_000) is None
+
+
+def test_load_audio_bank_subsamples_pt_bank(tmp_path: Path) -> None:
+    clips = tuple(torch.randn(16_000) for _ in range(10))
+    bank_path = tmp_path / "large_bank.pt"
+    torch.save(clips, str(bank_path))
+
+    loaded = load_audio_bank(
+        str(bank_path),
+        sample_rate=16_000,
+        min_len_sec=0.5,
+        max_bank_items=4,
+    )
+    assert loaded is not None
+    assert len(loaded) == 4

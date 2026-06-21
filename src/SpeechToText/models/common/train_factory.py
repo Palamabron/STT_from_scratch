@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any, Protocol
 
 import lightning.pytorch as pl
@@ -10,11 +11,12 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
     StochasticWeightAveraging,
 )
+from lightning.pytorch.callbacks.progress import TQDMProgressBar
 from lightning.pytorch.loggers import CSVLogger, Logger, WandbLogger
 from torch.utils.data import DataLoader
 
 from SpeechToText.augmentation import load_audio_bank
-from SpeechToText.models.common.callbacks import DatasetEpochSync
+from SpeechToText.models.common.callbacks import DatasetEpochSync, FileProgressCallback
 
 
 class _HasEncoderConfig(Protocol):
@@ -27,6 +29,7 @@ class TrainRunConfig(Protocol):
     data: Any
     audio_augment: Any
     ckpt_path: str | None
+    reset_optimizer_state: bool
     max_epochs: int
     precision: Any
     log_every_n_steps: int
@@ -52,18 +55,36 @@ def wire_data_filter_from_model(config: TrainRunConfig) -> None:
 
 def apply_ctc_augment_banks(config: TrainRunConfig) -> tuple[tuple[torch.Tensor, ...] | None, ...]:
     """Load optional MUSAN/RIR banks and tune augmentation probabilities for CTC training."""
+    from SpeechToText.augmentation import AudioAugmentConfig
+
+    default_aug = AudioAugmentConfig()
     sample_rate = config.data.features.sample_rate
     noise_bank = load_audio_bank(getattr(config, "musan_path", None), sample_rate=sample_rate)
     rir_bank = load_audio_bank(
         getattr(config, "rirs_path", None),
         sample_rate=sample_rate,
+        min_len_sec=0.05,
         normalize_rirs=True,
         max_rir_len_sec=0.5,
+        max_bank_items=4096,
     )
 
-    config.audio_augment.bg_noise_prob = 0.4 if noise_bank else 0.0
-    config.audio_augment.rir_prob = 0.3 if rir_bank else 0.0
+    if noise_bank and config.audio_augment.bg_noise_prob == default_aug.bg_noise_prob:
+        config.audio_augment.bg_noise_prob = 0.4
+    if rir_bank and config.audio_augment.rir_prob == default_aug.rir_prob:
+        config.audio_augment.rir_prob = 0.3
     return noise_bank, rir_bank
+
+
+def load_model_weights_from_checkpoint(model: pl.LightningModule, ckpt_path: str) -> None:
+    """Load model weights only (skip optimizer / scheduler / epoch state)."""
+    checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("state_dict", checkpoint)
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys in checkpoint {ckpt_path}: {unexpected[:5]}")
+    if missing:
+        raise RuntimeError(f"Missing keys when loading {ckpt_path}: {missing[:5]}")
 
 
 def build_training_logger(config: TrainRunConfig) -> Logger:
@@ -71,10 +92,13 @@ def build_training_logger(config: TrainRunConfig) -> Logger:
     if not use_wandb:
         checkpoint_dir = str(getattr(config, "checkpoint_dir", "checkpoints"))
         return CSVLogger(save_dir=checkpoint_dir, name="logs")
+    import wandb
+
     return WandbLogger(
         project=str(getattr(config, "wandb_project", "multilingual_asr")),
         name=getattr(config, "wandb_run_name", None),
         log_model=False,
+        settings=wandb.Settings(console="off"),
     )
 
 
@@ -90,7 +114,8 @@ def build_checkpoint_callback(
         save_top_k=3,
         save_last=True,
         every_n_epochs=1,
-        filename="{epoch:03d}-{val_wer_overall:.2f}",
+        filename="{epoch:03d}-val_wer={val/wer/overall:.2f}",
+        auto_insert_metric_name=False,
     )
 
 
@@ -112,7 +137,10 @@ def build_trainer(
         checkpoint_cb,
         epoch_sync,
         LearningRateMonitor(logging_interval="step"),
+        FileProgressCallback(),
     ]
+    if sys.stdout.isatty():
+        callbacks.append(TQDMProgressBar(refresh_rate=10))
     if extra_callbacks:
         callbacks.extend(extra_callbacks)
 
@@ -141,6 +169,7 @@ def build_trainer(
         accumulate_grad_batches=config.accumulate_grad_batches,
         num_sanity_val_steps=2,
         benchmark=True,
+        enable_progress_bar=sys.stdout.isatty(),
     )
 
 
@@ -163,9 +192,13 @@ def run_training(
         monitor=monitor,
         checkpoint_dir=checkpoint_dir,
     )
+    ckpt_path = config.ckpt_path
+    if ckpt_path and getattr(config, "reset_optimizer_state", False):
+        load_model_weights_from_checkpoint(model, ckpt_path)
+        ckpt_path = None
     trainer.fit(
         model,
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
-        ckpt_path=config.ckpt_path,
+        ckpt_path=ckpt_path,
     )

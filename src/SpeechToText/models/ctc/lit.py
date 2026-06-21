@@ -17,7 +17,7 @@ from SpeechToText.models.common import (
     greedy_ctc_decode,
 )
 from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
-from SpeechToText.models.common.optimizers import configure_adamw_noam
+from SpeechToText.models.common.optimizer_factory import configure_adamw_scheduler
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
     log_wandb_worst_val_examples,
@@ -47,7 +47,12 @@ class LitFastConformerCTC(pl.LightningModule):
         self.ctc_label_smoothing: Final[float] = float(config.ctc_label_smoothing)
         self.aux_ctc_weight: Final[float] = float(config.aux_ctc_weight)
 
-        gpu_augment = GPUAudioAugmentation(config.audio_augment, rir_bank, noise_bank)
+        gpu_augment = GPUAudioAugmentation(
+            config.audio_augment,
+            rir_bank,
+            noise_bank,
+            augment_start_epoch=config.audio_augment_start_epoch,
+        )
         spec_augment = SpecAugment(
             config.spec_augment, augment_start_epoch=config.spec_augment_start_epoch
         )
@@ -89,17 +94,13 @@ class LitFastConformerCTC(pl.LightningModule):
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
         d_model = int(self.config.model.encoder.d_model)
-        total_steps = self.trainer.estimated_stepping_batches
-        warmup_steps = int(total_steps * opt_cfg.warmup_ratio)
+        total_steps = int(self.trainer.estimated_stepping_batches)
 
-        return configure_adamw_noam(
+        return configure_adamw_scheduler(
             self,
-            lr=opt_cfg.lr,
-            betas=opt_cfg.betas,
-            epsilon=1e-8,
-            weight_decay=getattr(opt_cfg, "weight_decay", 0.01),
-            warmup_steps=max(1, warmup_steps),
+            optimizer_cfg=opt_cfg,
             d_model=d_model,
+            total_steps=total_steps,
         )
 
     def training_step(self, batch: dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor | None:
@@ -230,6 +231,7 @@ class LitFastConformerCTC(pl.LightningModule):
             self._val_examples.worst_first(),
             sample_rate=int(self.config.data.features.sample_rate),
             epoch=int(self.current_epoch),
+            step=int(self.trainer.global_step),
         )
 
         examples = self.examples.pop_all()

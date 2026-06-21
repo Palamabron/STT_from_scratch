@@ -70,8 +70,8 @@ class SpecAugment(nn.Module):
 class AudioAugmentConfig:
     """Audio-domain augmentation probabilities and ranges."""
 
-    augment_start_epoch: int = 7
-    heavy_augment_start_epoch: int = 30
+    augment_start_epoch: int = 0
+    heavy_augment_start_epoch: int = 0
     prob_apply: float = 0.5
     speed_factors: tuple[float, ...] = (0.95, 0.98, 1.0, 1.02, 1.05)
     speed_prob: float = 0.5
@@ -128,6 +128,7 @@ def _load_bank_from_pt(
     min_len_sec: float,
     normalize_rirs: bool,
     max_rir_len_sec: float | None,
+    max_bank_items: int | None = None,
 ) -> tuple[torch.Tensor, ...] | None:
     raw = torch.load(str(pt_path), map_location="cpu", weights_only=False)
     if isinstance(raw, tuple):
@@ -154,6 +155,16 @@ def _load_bank_from_pt(
 
     if not loaded:
         return None
+
+    if max_bank_items is not None and len(loaded) > max_bank_items:
+        rng = random.Random(42)
+        loaded = rng.sample(loaded, max_bank_items)
+        logger.info(
+            "Subsampled bank {} to {} items (max_bank_items={})",
+            pt_path,
+            len(loaded),
+            max_bank_items,
+        )
 
     logger.info("Loaded {} clips from prebuilt bank {}", len(loaded), pt_path)
     return tuple(loaded)
@@ -236,6 +247,7 @@ def load_audio_bank(
     normalize_rirs: bool = False,
     max_size_bytes: int = 20 * 1024 * 1024,
     max_rir_len_sec: float | None = 0.5,
+    max_bank_items: int | None = None,
 ) -> tuple[torch.Tensor, ...] | None:
     """Load a bank of mono waveforms from a ``.pt`` archive or directory tree.
 
@@ -248,6 +260,7 @@ def load_audio_bank(
         normalize_rirs: Whether to peak-normalize impulse responses.
         max_size_bytes: Skip files larger than this size during directory scans.
         max_rir_len_sec: Truncate RIR clips to this duration when set.
+        max_bank_items: Randomly subsample large ``.pt`` banks to this many clips.
 
     Returns:
         Tuple of 1-D waveform tensors, or ``None`` when no clips were loaded.
@@ -263,6 +276,7 @@ def load_audio_bank(
             min_len_sec=min_len_sec,
             normalize_rirs=normalize_rirs,
             max_rir_len_sec=max_rir_len_sec,
+            max_bank_items=max_bank_items,
         )
 
     if path.is_dir():
@@ -338,6 +352,24 @@ class AudioAugmentation:
         return waveform
 
 
+def _pack_waveform_bank(
+    bank: tuple[torch.Tensor, ...] | None,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Pack variable-length 1-D clips into ``[n_clips, max_len]`` for fast GPU indexing."""
+    if not bank:
+        return None
+    lengths = torch.tensor(
+        [int(clip.reshape(-1).numel()) for clip in bank],
+        dtype=torch.long,
+    )
+    max_len = int(lengths.max().item())
+    packed = torch.zeros(len(bank), max_len, dtype=torch.float32)
+    for index, clip in enumerate(bank):
+        flat = clip.reshape(-1)
+        packed[index, : flat.numel()] = flat
+    return packed, lengths
+
+
 class GPUAudioAugmentation(nn.Module):
     """GPU-side augmentations for batched waveforms during training."""
 
@@ -346,11 +378,23 @@ class GPUAudioAugmentation(nn.Module):
         cfg: AudioAugmentConfig,
         rir_bank: tuple[torch.Tensor, ...] | None,
         noise_bank: tuple[torch.Tensor, ...] | None,
+        augment_start_epoch: int = 0,
     ) -> None:
         super().__init__()
         self.cfg = cfg
-        self.rir_bank = list(rir_bank) if rir_bank else None
-        self.noise_bank = list(noise_bank) if noise_bank else None
+        self.augment_start_epoch = int(augment_start_epoch)
+        rir_packed = _pack_waveform_bank(rir_bank)
+        noise_packed = _pack_waveform_bank(noise_bank)
+        if rir_packed is not None:
+            self.register_buffer("rir_packed", rir_packed[0], persistent=False)
+        else:
+            self.rir_packed = None
+        if noise_packed is not None:
+            self.register_buffer("noise_packed", noise_packed[0], persistent=False)
+            self.register_buffer("noise_lengths", noise_packed[1], persistent=False)
+        else:
+            self.noise_packed = None
+            self.noise_lengths = None
         self.current_epoch = 0
 
     def set_current_epoch(self, epoch: int) -> None:
@@ -362,7 +406,7 @@ class GPUAudioAugmentation(nn.Module):
         if not self.training:
             return audio
 
-        if self.current_epoch < self.cfg.augment_start_epoch:
+        if self.current_epoch < self.augment_start_epoch:
             return audio
 
         batch_size, time_steps = audio.shape
@@ -388,20 +432,15 @@ class GPUAudioAugmentation(nn.Module):
         if self.current_epoch < self.cfg.heavy_augment_start_epoch:
             return audio.clamp(-1.0, 1.0)
 
-        if self.cfg.rir_prob > 0.0 and self.rir_bank:
+        if self.cfg.rir_prob > 0.0 and self.rir_packed is not None:
             rir_mask = torch.rand(batch_size, device=device) < self.cfg.rir_prob
             if rir_mask.any():
-                indices = [random.randint(0, len(self.rir_bank) - 1) for _ in range(batch_size)]
-                selected_rirs = [self.rir_bank[index] for index in indices]
-                max_rir_len = max(rir.shape[0] for rir in selected_rirs)
-                rir_batch = (
-                    torch.stack(
-                        [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in selected_rirs]
-                    )
-                    .to(device, non_blocking=True)
-                    .unsqueeze(1)
+                indices = torch.randint(
+                    0, int(self.rir_packed.size(0)), (batch_size,), device=device
                 )
-                rir_batch = rir_batch.flip(2)
+                selected_rirs = self.rir_packed[indices]
+                max_rir_len = int(selected_rirs.size(1))
+                rir_batch = selected_rirs.unsqueeze(1).flip(2)
 
                 padding = max_rir_len - 1
                 convolved = F.conv1d(
@@ -412,10 +451,16 @@ class GPUAudioAugmentation(nn.Module):
                 ).squeeze(0)[:, :time_steps]
                 audio = torch.where(rir_mask.unsqueeze(1), convolved, audio)
 
-        if self.cfg.bg_noise_prob > 0.0 and self.noise_bank:
+        if (
+            self.cfg.bg_noise_prob > 0.0
+            and self.noise_packed is not None
+            and self.noise_lengths is not None
+        ):
             noise_mask = torch.rand(batch_size, device=device) < self.cfg.bg_noise_prob
             if noise_mask.any():
-                indices = [random.randint(0, len(self.noise_bank) - 1) for _ in range(batch_size)]
+                indices = torch.randint(
+                    0, int(self.noise_packed.size(0)), (batch_size,), device=device
+                )
                 snrs_db = torch.zeros(batch_size, device=device).normal_(
                     self.cfg.snr_db_mean, self.cfg.snr_db_std
                 )
@@ -424,12 +469,13 @@ class GPUAudioAugmentation(nn.Module):
                 for index in range(batch_size):
                     if not noise_mask[index]:
                         continue
-                    noise = self.noise_bank[indices[index]].to(device, non_blocking=True)
-                    if noise.numel() < time_steps:
-                        repeats = (time_steps + noise.numel() - 1) // noise.numel()
+                    noise_len = int(self.noise_lengths[indices[index]].item())
+                    noise = self.noise_packed[indices[index], :noise_len]
+                    if noise_len < time_steps:
+                        repeats = (time_steps + noise_len - 1) // noise_len
                         noise = noise.repeat(repeats)[:time_steps]
                     else:
-                        start = random.randint(0, max(0, noise.numel() - time_steps))
+                        start = random.randint(0, max(0, noise_len - time_steps))
                         noise = noise[start : start + time_steps]
 
                     signal_power = audio[index].pow(2).mean()

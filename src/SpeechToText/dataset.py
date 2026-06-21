@@ -56,7 +56,7 @@ class LoaderConfig:
     seed: int = 42
     multiprocessing_context: str | None = "fork"
     cache_audio: bool = False
-    stratify_by_language: bool = True
+    stratify_by_language: bool = False
 
 
 @dataclass(slots=True)

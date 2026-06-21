@@ -25,12 +25,13 @@ def build_train_final_from_buckets(
     bucket_specs: list[DatasetSpec],
     individual_manifests_dir: Path,
     output_manifest: Path,
+    underdelivery_policy: UnderdeliveryPolicy = UnderdeliveryPolicy.WARN,
 ) -> None:
     _build_final_from_buckets(
         bucket_specs=bucket_specs,
         individual_manifests_dir=individual_manifests_dir,
         output_manifest=output_manifest,
-        underdelivery_policy=UnderdeliveryPolicy.RAISE,
+        underdelivery_policy=underdelivery_policy,
     )
 
 
