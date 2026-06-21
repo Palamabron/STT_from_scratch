@@ -184,9 +184,9 @@ export SPM=models/spm_unigram_4k_trainval.model
 | 4 | `make train-tdt-4090` | After stable RNN-T baseline |
 | 5 | `make train-ctc-attn-4090` | Optional |
 
-OOM fallbacks: `train-ctc-4090-oom` (batch duration 1200), `train-ctc-4090-sm` (~55M params), `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
+OOM fallbacks: `train-ctc-4090-oom` (batch duration 180), `train-ctc-4090-sm` (~55M params), `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
 
-Hyperparameter reference: `configs/train/*.env`.
+Hyperparameter reference (RTX 4090): `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
 
 #### Warm-start RNN-T from CTC
 
@@ -292,7 +292,7 @@ RNN-T/TDT: add `--model_type tdt --val_max_symbols_per_t 10`.
 
 ```
 configs/data.yaml          Dataset buckets
-configs/train/*.env        RTX 4090 presets
+configs/train/             RTX 4090 presets (ctc_4090, ctc_4090_65m, ctc_4090_oom, ctc_attn_4090, transducer_4090)
 data/manifests/final/      train_final.jsonl, val_final.jsonl
 data/augment/              MUSAN/RIR banks
 models/                    SentencePiece tokenizers
@@ -332,7 +332,7 @@ tests/                     Unit tests
 
 | Problem | Fix |
 |---------|-----|
-| OOM | `*-oom` Makefile target or lower `--data.loader.train_max_batch_duration` |
+| OOM | `*-oom` Makefile target or lower `--data.loader.train_max_batch_duration` (default 1200 s) |
 | RNN-T val OOM | Keep `--compute_eval_loss false` (default) |
 | Missing `HF_TOKEN` | Set in `.env` before `make prepare-data` |
 | W&B errors | `--no-use-wandb` |

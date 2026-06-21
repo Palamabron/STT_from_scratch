@@ -136,7 +136,7 @@ def create_pool(decode_types: tuple[str, ...], num_workers: int) -> mp.pool.Pool
     need_pool = any(d in ("beam", "beam_kenlm") for d in decode_types)
     if not need_pool or num_workers <= 0:
         return None
-    ctx = mp.get_context("fork")
+    ctx = mp.get_context("spawn")
     return ctx.Pool(processes=num_workers)
 
 

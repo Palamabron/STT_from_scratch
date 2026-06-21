@@ -83,8 +83,9 @@ def load_model_weights_from_checkpoint(model: pl.LightningModule, ckpt_path: str
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
     if unexpected:
         raise RuntimeError(f"Unexpected keys in checkpoint {ckpt_path}: {unexpected[:5]}")
-    if missing:
-        raise RuntimeError(f"Missing keys when loading {ckpt_path}: {missing[:5]}")
+    model_missing = [key for key in missing if key.startswith("net.")]
+    if model_missing:
+        raise RuntimeError(f"Missing model keys when loading {ckpt_path}: {model_missing[:5]}")
 
 
 def build_training_logger(config: TrainRunConfig) -> Logger:

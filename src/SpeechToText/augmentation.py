@@ -466,6 +466,11 @@ class GPUAudioAugmentation(nn.Module):
                 )
                 snrs_db = snrs_db.clamp(self.cfg.snr_db_min, self.cfg.snr_db_max)
 
+                max_starts = (self.noise_lengths[indices] - time_steps).clamp(min=0)
+                starts = (
+                    torch.rand(batch_size, device=device) * max_starts.to(torch.float32)
+                ).long()
+
                 for index in range(batch_size):
                     if not noise_mask[index]:
                         continue
@@ -475,7 +480,7 @@ class GPUAudioAugmentation(nn.Module):
                         repeats = (time_steps + noise_len - 1) // noise_len
                         noise = noise.repeat(repeats)[:time_steps]
                     else:
-                        start = random.randint(0, max(0, noise_len - time_steps))
+                        start = int(starts[index].item())
                         noise = noise[start : start + time_steps]
 
                     signal_power = audio[index].pow(2).mean()

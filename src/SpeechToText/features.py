@@ -12,6 +12,15 @@ from .dataset import FeatureConfig
 FEATURE_NORM_EPS = 1e-5
 
 
+def mel_frames_from_audio_lengths(
+    audio_lengths: torch.Tensor,
+    *,
+    hop_length: int,
+) -> torch.Tensor:
+    """Mel frame counts aligned with ``MelSpectrogram(center=True)`` on mono waveforms."""
+    return (audio_lengths // hop_length) + 1
+
+
 class WaveformFeaturizer(nn.Module):
     """Convert raw waveforms to normalized log-mel features."""
 
@@ -49,7 +58,7 @@ class WaveformFeaturizer(nn.Module):
             self.gpu_augment.set_current_epoch(self._current_epoch)
 
     def audio_lengths_to_feat_lengths(self, audio_lengths: torch.Tensor) -> torch.Tensor:
-        return (audio_lengths // self.hop_length) + 1
+        return mel_frames_from_audio_lengths(audio_lengths, hop_length=self.hop_length)
 
     def forward(
         self,
@@ -64,6 +73,7 @@ class WaveformFeaturizer(nn.Module):
         mel = self.amplitude_to_db(mel)
         feats = mel.transpose(1, 2).contiguous()
         feat_lens = self.audio_lengths_to_feat_lengths(audio_lengths.to(wav.device))
+        feat_lens = feat_lens.clamp(max=int(feats.size(1)))
 
         if self.training and self.spec_augment is not None:
             feats = self.spec_augment(feats)

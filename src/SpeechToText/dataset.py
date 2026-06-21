@@ -49,12 +49,12 @@ class LoaderConfig:
     pin_memory: bool = True
     persistent_workers: bool = True
     prefetch_factor: int = 4
-    train_max_batch_duration: float | None = 240.0
+    train_max_batch_duration: float | None = 1200.0
     train_max_batch_size: int = 64
     bucket_size: int = 4096
     shuffle: bool = True
     seed: int = 42
-    multiprocessing_context: str | None = "fork"
+    multiprocessing_context: str | None = "spawn"
     cache_audio: bool = False
     stratify_by_language: bool = False
 
@@ -107,12 +107,18 @@ def estimate_encoder_output_length(
     min_speed_factor: float = 1.0,
 ) -> int:
     """Estimate Conformer encoder output length from manifest audio duration."""
+    from SpeechToText.features import mel_frames_from_audio_lengths
     from SpeechToText.models.conformer.subsampling import subsample_lengths
 
     effective_duration = max(0.0, float(duration_sec) * float(min_speed_factor))
     audio_samples = int(effective_duration * sample_rate)
     hop_length = max(1, int(sample_rate * hop_length_ms / 1000.0))
-    feat_len = (audio_samples // hop_length) + 1
+    feat_len = int(
+        mel_frames_from_audio_lengths(
+            torch.tensor([audio_samples], dtype=torch.long),
+            hop_length=hop_length,
+        ).item()
+    )
     return int(subsample_lengths(feat_len, subsampling_factor))
 
 

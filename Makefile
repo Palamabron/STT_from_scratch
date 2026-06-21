@@ -12,6 +12,12 @@ RIR_DIR := data/external/rirs/simulated_rirs
 KENLM_MODEL := lm/kenlm_en_pl_5gram.arpa
 DATA_CONFIG := configs/data.yaml
 
+# Duration-batched training: total seconds of audio per step (see configs/train/*.env)
+BATCH_DURATION := 1200
+BATCH_DURATION_OOM := 180
+BATCH_DURATION_ATTN_OOM := 400
+BATCH_DURATION_RNNT_OOM := 800
+
 TRAIN_PATHS := \
 	--data.manifests.train $(TRAIN_MANIFEST) \
 	--data.manifests.val $(VAL_MANIFEST) \
@@ -166,7 +172,7 @@ train-ctc-4090:
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.aux_layer 7 \
-		--data.loader.train_max_batch_duration 240 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
@@ -186,7 +192,7 @@ train-ctc-4090-oom:
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.aux_layer 7 \
-		--data.loader.train_max_batch_duration 180 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_OOM) \
 		--data.loader.train_max_batch_size 48 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
@@ -205,7 +211,7 @@ train-ctc-4090-sm:
 		--model.encoder.n_layers 14 \
 		--model.encoder.n_heads 6 \
 		--model.aux_layer 6 \
-		--data.loader.train_max_batch_duration 300 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
@@ -225,7 +231,7 @@ train-ctc-4090-65m:
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--ctc_label_smoothing 0.1 \
 		--aux_ctc_weight 0.3 \
@@ -249,7 +255,7 @@ train-ctc-4090-65m-v2:
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--accumulate_grad_batches 2 \
 		--ctc_label_smoothing 0.0 \
@@ -276,7 +282,7 @@ train-ctc-4090-65m-v3:
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--accumulate_grad_batches 2 \
 		--ctc_label_smoothing 0.0 \
@@ -306,7 +312,7 @@ train-ctc-4090-65m-v4:
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--accumulate_grad_batches 2 \
 		--ctc_label_smoothing 0.0 \
@@ -341,7 +347,7 @@ train-ctc-4090-65m-v5:
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--accumulate_grad_batches 2 \
 		--ctc_label_smoothing 0.0 \
@@ -390,7 +396,7 @@ train-ctc-4090-65m-v6:
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--model.aux_layer 8 \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--data.loader.train_max_batch_size 64 \
 		--accumulate_grad_batches 2 \
 		--ctc_label_smoothing 0.0 \
@@ -417,7 +423,7 @@ train-rnnt-4090:
 		--model.encoder.d_model 384 \
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--rnnt_clamp -1.0 \
 		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
@@ -436,7 +442,7 @@ train-rnnt-4090-oom:
 		--model.encoder.d_model 384 \
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_RNNT_OOM) \
 		--rnnt_clamp -1.0 \
 		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
@@ -453,7 +459,7 @@ train-ctc-attn-4090:
 		--model.encoder.n_layers 12 \
 		--model.encoder.n_heads 4 \
 		--model.aux_layer 5 \
-		--data.loader.train_max_batch_duration 600 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--ctc_weight 0.3 \
 		--aux_ctc_weight 0.3 \
 		--ctc_label_smoothing 0.1 \
@@ -473,7 +479,7 @@ train-ctc-attn-4090-oom:
 		--model.encoder.n_layers 12 \
 		--model.encoder.n_heads 4 \
 		--model.aux_layer 5 \
-		--data.loader.train_max_batch_duration 400 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_ATTN_OOM) \
 		--ctc_weight 0.3 \
 		--wandb_run_name ctc-attn-4090-oom
 
@@ -489,7 +495,7 @@ train-tdt-4090:
 		--model.encoder.d_model 384 \
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
-		--data.loader.train_max_batch_duration 1200 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--rnnt_clamp -1.0 \
 		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
@@ -525,7 +531,7 @@ ablate-subsample-4x:
 		--max_epochs 10 \
 		--checkpoint_dir checkpoints/ablate_subsample4x \
 		--model.encoder.subsampling_factor 4 \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--wandb_run_name ablate-subsample-4x
 
 ablate-kenlm-ctc:
@@ -557,7 +563,7 @@ ablate-rnnt-clamp:
 		--checkpoint_dir checkpoints/ablate_rnnt_clamp_pos \
 		--rnnt_clamp 1.0 \
 		--no-compute-eval-loss \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--wandb_run_name ablate-rnnt-clamp-1.0
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.tdt.train \
 		$(TRAIN_PATHS) \
@@ -566,5 +572,5 @@ ablate-rnnt-clamp:
 		--checkpoint_dir checkpoints/ablate_rnnt_clamp_neg \
 		--rnnt_clamp -1.0 \
 		--no-compute-eval-loss \
-		--data.loader.train_max_batch_duration 800 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
 		--wandb_run_name ablate-rnnt-clamp--1.0
