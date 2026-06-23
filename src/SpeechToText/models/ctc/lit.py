@@ -82,10 +82,16 @@ class LitFastConformerCTC(pl.LightningModule):
         self.featurizer = self.featurizer.to(self.device)
 
     def _encode_batch(
-        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+        self,
+        audio: torch.Tensor,
+        audio_lengths: torch.Tensor,
+        clean_pass: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self.featurizer.set_current_epoch(self.current_epoch)
-        return cast(tuple[torch.Tensor, torch.Tensor], self.featurizer(audio, audio_lengths))
+        return cast(
+            tuple[torch.Tensor, torch.Tensor],
+            self.featurizer(audio, audio_lengths, clean_pass=clean_pass),
+        )
 
     def forward(self, feats: torch.Tensor, feat_lengths: torch.Tensor) -> torch.Tensor:
         out = self.net(feats, feat_lengths)
@@ -106,8 +112,11 @@ class LitFastConformerCTC(pl.LightningModule):
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
         target_lengths = batch["target_length"]
+        clean_pass = batch.get("clean_pass")
+        if clean_pass is not None:
+            clean_pass = clean_pass.to(self.device)
 
-        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
         out = self.net(feats, feat_lens)
 
         log_probs = cast(torch.Tensor, out.log_probs)
@@ -127,7 +136,10 @@ class LitFastConformerCTC(pl.LightningModule):
             audio_lengths = batch["audio_length"]
             targets = batch["targets"]
             target_lengths = batch["target_length"]
-            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            clean_pass = batch.get("clean_pass")
+            if clean_pass is not None:
+                clean_pass = clean_pass.to(self.device)
+            feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
             out = self.net(feats, feat_lens)
             log_probs = cast(torch.Tensor, out.log_probs)
             aux_log_probs = cast(torch.Tensor, out.aux_log_probs)
@@ -156,6 +168,14 @@ class LitFastConformerCTC(pl.LightningModule):
             on_epoch=True,
             batch_size=audio.size(0),
         )
+        if clean_pass is not None:
+            self.log(
+                "train/aug/clean_pass_frac",
+                clean_pass.float().mean(),
+                on_step=True,
+                on_epoch=True,
+                batch_size=audio.size(0),
+            )
         return losses.total
 
     def validation_step(self, batch: ValBatch, batch_idx: int) -> None:

@@ -87,11 +87,15 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self.featurizer = self.featurizer.to(self.device)
 
     def _encode_batch(
-        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+        self,
+        audio: torch.Tensor,
+        audio_lengths: torch.Tensor,
+        clean_pass: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self.featurizer.set_current_epoch(self.current_epoch)
         return cast(
-            tuple[torch.Tensor, torch.Tensor], self.featurizer(audio.to(self.device), audio_lengths)
+            tuple[torch.Tensor, torch.Tensor],
+            self.featurizer(audio.to(self.device), audio_lengths, clean_pass=clean_pass),
         )
 
     def build_decoder_sequences(
@@ -147,8 +151,11 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
         target_lengths = batch["target_length"]
+        clean_pass = batch.get("clean_pass")
+        if clean_pass is not None:
+            clean_pass = clean_pass.to(self.device)
 
-        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
         dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
         out = self.forward(feats, feat_lens, decoder_input=dec_in)
         assert out.dec_log_probs is not None
@@ -162,7 +169,10 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             audio_lengths = batch["audio_length"]
             targets = batch["targets"]
             target_lengths = batch["target_length"]
-            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            clean_pass = batch.get("clean_pass")
+            if clean_pass is not None:
+                clean_pass = clean_pass.to(self.device)
+            feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
             dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
             out = self.forward(feats, feat_lens, decoder_input=dec_in)
             assert out.dec_log_probs is not None

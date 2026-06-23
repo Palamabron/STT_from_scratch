@@ -72,8 +72,8 @@ class AudioAugmentConfig:
 
     augment_start_epoch: int = 0
     heavy_augment_start_epoch: int = 0
-    prob_apply: float = 0.5
-    speed_factors: tuple[float, ...] = (0.95, 0.98, 1.0, 1.02, 1.05)
+    prob_apply: float = 0.5  # deprecated, ignored; kept for checkpoint/worker pickle compat
+    speed_factors: tuple[float, ...] = (0.95, 0.98, 1.02, 1.05)
     speed_prob: float = 0.5
     gain_prob: float = 0.3
     gain_db_min: float = -6.0
@@ -94,6 +94,12 @@ class AudioAugmentConfig:
     noise_bank: tuple[torch.Tensor, ...] | None = None
     gaussian_prob: float = 0.0
     gaussian_scale: float = 0.005
+    clean_pass_prob: float = 0.08
+
+    def __getattr__(self, name: str) -> float:
+        if name == "clean_pass_prob":
+            return 0.08
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
 
 def _postprocess_bank_clip(
@@ -341,8 +347,6 @@ class AudioAugmentation:
     def __call__(self, audio: torch.Tensor) -> torch.Tensor:
         if self.current_epoch < self.augment_start_epoch:
             return audio
-        if float(torch.rand(()).item()) > self.cfg.prob_apply:
-            return audio
 
         waveform = audio
         if self.cfg.speed_prob > 0.0:
@@ -401,7 +405,11 @@ class GPUAudioAugmentation(nn.Module):
         self.current_epoch = int(epoch)
 
     @torch.inference_mode()
-    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        audio: torch.Tensor,
+        clean_pass: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply gain, noise, and reverberation augmentations to ``[batch, time]``."""
         if not self.training:
             return audio
@@ -414,6 +422,8 @@ class GPUAudioAugmentation(nn.Module):
 
         if self.cfg.gain_prob > 0.0:
             gain_mask = torch.rand(batch_size, device=device) < self.cfg.gain_prob
+            if clean_pass is not None:
+                gain_mask = gain_mask & ~clean_pass
             if gain_mask.any():
                 gains_db = torch.zeros(batch_size, device=device).normal_(
                     self.cfg.gain_db_mean, self.cfg.gain_db_std
@@ -425,6 +435,8 @@ class GPUAudioAugmentation(nn.Module):
 
         if self.cfg.gaussian_prob > 0.0:
             noise_mask = torch.rand(batch_size, device=device) < self.cfg.gaussian_prob
+            if clean_pass is not None:
+                noise_mask = noise_mask & ~clean_pass
             if noise_mask.any():
                 noise = torch.randn_like(audio) * self.cfg.gaussian_scale
                 audio = torch.where(noise_mask.unsqueeze(1), audio + noise, audio)
@@ -434,6 +446,8 @@ class GPUAudioAugmentation(nn.Module):
 
         if self.cfg.rir_prob > 0.0 and self.rir_packed is not None:
             rir_mask = torch.rand(batch_size, device=device) < self.cfg.rir_prob
+            if clean_pass is not None:
+                rir_mask = rir_mask & ~clean_pass
             if rir_mask.any():
                 indices = torch.randint(
                     0, int(self.rir_packed.size(0)), (batch_size,), device=device
@@ -457,6 +471,8 @@ class GPUAudioAugmentation(nn.Module):
             and self.noise_lengths is not None
         ):
             noise_mask = torch.rand(batch_size, device=device) < self.cfg.bg_noise_prob
+            if clean_pass is not None:
+                noise_mask = noise_mask & ~clean_pass
             if noise_mask.any():
                 indices = torch.randint(
                     0, int(self.noise_packed.size(0)), (batch_size,), device=device

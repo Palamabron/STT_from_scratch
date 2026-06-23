@@ -56,7 +56,7 @@ class LoaderConfig:
     seed: int = 42
     multiprocessing_context: str | None = "spawn"
     cache_audio: bool = False
-    stratify_by_language: bool = False
+    stratify_by_language: bool = True
 
 
 @dataclass(slots=True)
@@ -290,14 +290,20 @@ class ManifestDataset(Dataset[dict[str, Any]]):
         target_len = self.target_lengths[idx]
         waveform = self._load_waveform(idx)
 
+        clean_pass = False
         if self.audio_augment is not None and self.split == "train":
-            waveform = self.audio_augment(waveform)
+            aug = self.audio_augment
+            if aug.current_epoch >= aug.augment_start_epoch:
+                clean_pass = float(torch.rand(()).item()) < float(aug.cfg.clean_pass_prob)
+            if not clean_pass:
+                waveform = aug(waveform)
 
         sample: dict[str, Any] = {
             "audio": waveform,
             "audio_length": int(waveform.numel()),
             "targets": targets,
             "target_length": int(target_len),
+            "clean_pass": clean_pass,
         }
 
         if self.split != "train":
@@ -336,6 +342,12 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "target_length": target_lengths,
     }
 
+    if "clean_pass" in batch[0]:
+        collated["clean_pass"] = torch.tensor(
+            [bool(item["clean_pass"]) for item in batch],
+            dtype=torch.bool,
+        )
+
     if "text" in batch[0]:
         collated["text"] = [item["text"] for item in batch]
         collated["language"] = [item["language"] for item in batch]
@@ -358,7 +370,7 @@ class DurationBatchSampler(Sampler[list[int]]):
         seed: int = 42,
         min_batch_size: int = 1,
         languages: list[str] | None = None,
-        stratify_by_language: bool = False,
+        stratify_by_language: bool = True,
     ) -> None:
         self.durations: Final[list[float]] = durations
         self.languages: Final[list[str] | None] = languages

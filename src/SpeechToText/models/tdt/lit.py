@@ -85,11 +85,19 @@ class LitFastConformerTDT(pl.LightningModule):
         self.featurizer = self.featurizer.to(self.device)
 
     def _encode_batch(
-        self, audio: torch.Tensor, audio_lengths: torch.Tensor
+        self,
+        audio: torch.Tensor,
+        audio_lengths: torch.Tensor,
+        clean_pass: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         self.featurizer.set_current_epoch(self.current_epoch)
         return cast(
-            tuple[torch.Tensor, torch.Tensor], self.featurizer(audio.to(self.device), audio_lengths)
+            tuple[torch.Tensor, torch.Tensor],
+            self.featurizer(
+                audio.to(self.device),
+                audio_lengths,
+                clean_pass=clean_pass.to(self.device) if clean_pass is not None else None,
+            ),
         )
 
     def forward(
@@ -165,8 +173,11 @@ class LitFastConformerTDT(pl.LightningModule):
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
         target_lengths = batch["target_length"]
+        clean_pass = batch.get("clean_pass")
+        if clean_pass is not None:
+            clean_pass = clean_pass.to(self.device)
 
-        feats, feat_lens = self._encode_batch(audio, audio_lengths)
+        feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
         out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
 
         filtered = self._maybe_filter_batch(batch, out.out_lengths, target_lengths)
@@ -179,7 +190,10 @@ class LitFastConformerTDT(pl.LightningModule):
             audio_lengths = batch["audio_length"]
             targets = batch["targets"]
             target_lengths = batch["target_length"]
-            feats, feat_lens = self._encode_batch(audio, audio_lengths)
+            clean_pass = batch.get("clean_pass")
+            if clean_pass is not None:
+                clean_pass = clean_pass.to(self.device)
+            feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
             out = self.forward(feats, feat_lens, targets=targets, target_lengths=target_lengths)
 
         loss = self._transducer_loss(out, targets, target_lengths)

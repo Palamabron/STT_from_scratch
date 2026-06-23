@@ -57,5 +57,10 @@ def filter_batch_by_encoder_length(
         filtered_map["dataset"] = [batch_map["dataset"][i] for i in indices]
     if "text" in batch_map:
         filtered_map["text"] = [batch_map["text"][i] for i in indices]
+    if "clean_pass" in batch_map:
+        clean_pass = batch_map["clean_pass"]
+        filtered_map["clean_pass"] = clean_pass.index_select(
+            0, torch.tensor(indices, device=clean_pass.device)
+        )
 
     return filtered, out_lengths_f, target_lengths_f, valid

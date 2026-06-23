@@ -202,4 +202,5 @@ def run_training(
         train_dataloaders=train_loader,
         val_dataloaders=val_loader,
         ckpt_path=ckpt_path,
+        weights_only=False if ckpt_path else None,
     )

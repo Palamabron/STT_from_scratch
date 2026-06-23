@@ -64,10 +64,11 @@ class WaveformFeaturizer(nn.Module):
         self,
         audio: torch.Tensor,
         audio_lengths: torch.Tensor,
+        clean_pass: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         wav = audio
         if self.training and self.gpu_augment is not None:
-            wav = self.gpu_augment(wav)
+            wav = self.gpu_augment(wav, clean_pass=clean_pass)
 
         mel = self.mel_spec(wav)
         mel = self.amplitude_to_db(mel)
@@ -76,7 +77,15 @@ class WaveformFeaturizer(nn.Module):
         feat_lens = feat_lens.clamp(max=int(feats.size(1)))
 
         if self.training and self.spec_augment is not None:
-            feats = self.spec_augment(feats)
+            spec_epoch_ok = self.spec_augment.current_epoch >= self.spec_augment.augment_start_epoch
+            if spec_epoch_ok:
+                if clean_pass is not None and bool(clean_pass.any()):
+                    feats_before = feats.clone()
+                    feats_aug = self.spec_augment(feats)
+                    keep_clean = clean_pass.view(-1, 1, 1)
+                    feats = torch.where(keep_clean, feats_before, feats_aug)
+                else:
+                    feats = self.spec_augment(feats)
 
         batch_size, time_steps, _ = feats.shape
         mask = torch.arange(time_steps, device=feats.device).unsqueeze(0) < feat_lens.unsqueeze(1)
