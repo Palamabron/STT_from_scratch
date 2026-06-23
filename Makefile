@@ -582,7 +582,7 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
 		--data.loader.train_max_batch_duration $(BATCH_DURATION_RNNT_OOM) \
-		--data.loader.train_max_batch_size 48 \
+		--data.loader.train_max_batch_size 24 \
 		--data.loader.num_workers 4 \
 		--data.loader.no-persistent-workers \
 		--data.loader.prefetch-factor 2 \
@@ -590,6 +590,7 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
 		--joint_fused_batch_size 2 \
+		--no-fused-log-softmax \
 		--spec_augment.time_masks 6 \
 		--spec_augment.time_width_fraction 0.10 \
 		--spec_augment_start_epoch 10 \

@@ -66,11 +66,16 @@ def compute_tdt_losses(
     tdt_omega: float = 0.1,
 ) -> TDTLosses:
     """Compute RNN-T or TDT (token + duration) training losses."""
-    max_time = int(token_logits.size(1))
-    max_target = int(token_logits.size(2)) - 1
-    out_lengths_i = out_lengths.to(dtype=torch.long).clamp(min=1, max=max_time)
-    target_lengths_i = target_lengths.to(dtype=torch.long).clamp(max=max_target)
-    targets_i = targets_padded.to(dtype=torch.long)
+    out_lengths_i = out_lengths.to(dtype=torch.long).clamp(min=1, max=int(token_logits.size(1)))
+    target_lengths_i = target_lengths.to(dtype=torch.long)
+    max_time = int(out_lengths_i.max().item()) if out_lengths_i.numel() else int(token_logits.size(1))
+    max_target = int(target_lengths_i.max().item()) if target_lengths_i.numel() else 0
+    label_steps = max_target + 1
+
+    token_logits = token_logits[:, :max_time, :label_steps, :].contiguous()
+    if duration_logits is not None:
+        duration_logits = duration_logits[:, :max_time, :label_steps, :].contiguous()
+    targets_i = targets_padded[:, :max_target].to(dtype=torch.long)
 
     rnnt = rnnt_loss_mean(
         logits=token_logits,

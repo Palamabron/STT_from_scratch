@@ -77,6 +77,7 @@ class FastConformerTDT(nn.Module):
         target_lengths: torch.Tensor,
     ) -> TDTOutput:
         enc, out_lengths = self.encoder(feats, feat_lengths)
+        out_lengths = out_lengths.clamp(max=int(enc.size(1)))
         dec_in = self.build_decoder_input_from_concat(targets_concat, target_lengths, self.blank_id)
         dec = self.decoder(dec_in)
 
