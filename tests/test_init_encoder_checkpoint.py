@@ -39,7 +39,7 @@ def _write_minimal_ctc_checkpoint(path: Path, sp: SentencePieceProcessor) -> Non
             "global_step": 10,
             "state_dict": lit.state_dict(),
             "hyper_parameters": {"config": config},
-            "pytorch-lightning-version": pl.__version__,
+            "pytorch-lightning_version": pl.__version__,
         },
         path,
     )

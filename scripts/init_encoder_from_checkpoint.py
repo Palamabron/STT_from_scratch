@@ -69,7 +69,7 @@ def _save_lightning_checkpoint(module: pl.LightningModule, output_path: Path) ->
         "hyper_parameters": {"config": module.config},
     }
     module.on_save_checkpoint(checkpoint)
-    checkpoint["pytorch-lightning-version"] = pl.__version__
+    checkpoint["pytorch-lightning_version"] = pl.__version__
     torch.save(checkpoint, output_path)
 
 
