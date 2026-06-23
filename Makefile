@@ -558,6 +558,7 @@ init-tdt-from-ctc-65m:
 		--source-checkpoint $(CTC_V6_BEST_TRAIN) \
 		--tokenizer-model $(SPM_2K) \
 		--target rnnt \
+		--use-tdt \
 		--output $(TDT_65M_INIT)
 
 train-tdt-4090-65m: init-tdt-from-ctc-65m

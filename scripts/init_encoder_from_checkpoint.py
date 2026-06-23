@@ -19,6 +19,7 @@ class InitEncoderConfig:
     tokenizer_model: str
     target: Literal["rnnt", "ctc_attention"]
     output: str
+    use_tdt: bool = False
 
 
 def _extract_encoder_state(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -31,6 +32,7 @@ def _build_target_module(
     *,
     sp: SentencePieceProcessor,
     source_ckpt: dict[str, object] | None = None,
+    use_tdt: bool = False,
 ) -> torch.nn.Module:
     vocab_size = int(sp.get_piece_size()) + 1
 
@@ -43,6 +45,8 @@ def _build_target_module(
             source_config = source_ckpt.get("hyper_parameters", {}).get("config")
             if source_config is not None and hasattr(source_config, "model"):
                 config.model.encoder = source_config.model.encoder
+        config.use_tdt = bool(use_tdt)
+        config.model.joint.use_tdt = bool(use_tdt)
         config.model.decoder.vocab_size = vocab_size
         config.model.joint.vocab_size = vocab_size
         config.model.decoder.d_model = int(config.model.encoder.d_model)
@@ -87,7 +91,7 @@ def main(cfg: InitEncoderConfig) -> None:
     if not encoder_weights:
         raise ValueError(f"No net.encoder.* weights found in {source_path}")
 
-    target_module = _build_target_module(cfg.target, sp=sp, source_ckpt=source_ckpt)
+    target_module = _build_target_module(cfg.target, sp=sp, source_ckpt=source_ckpt, use_tdt=cfg.use_tdt)
     target_state = target_module.state_dict()
 
     copied = 0
