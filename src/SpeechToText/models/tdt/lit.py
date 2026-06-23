@@ -111,13 +111,11 @@ class LitFastConformerTDT(pl.LightningModule):
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
-        d_model = int(self.config.model.encoder.d_model)
         total_steps = int(self.trainer.estimated_stepping_batches)
 
         return configure_adamw_scheduler(
             self,
             optimizer_cfg=opt_cfg,
-            d_model=d_model,
             total_steps=total_steps,
         )
 

@@ -102,7 +102,7 @@ train-tokenizer-8k:
 		--balance-languages
 	cd $(REPO_ROOT) && $(UV) python scripts/tokenizer_coverage_report.py \
 		--manifests $(TRAIN_MANIFEST) $(VAL_MANIFEST) \
-		--model-path $(SPM_8K).model \
+		--model-path $(SPM_8K) \
 		--output-json results/tokenizer_coverage_8k.json
 
 tokenizer-coverage:

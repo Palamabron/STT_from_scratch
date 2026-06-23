@@ -134,13 +134,11 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt_cfg = self.config.optimizer
-        d_model = int(self.config.model.encoder.d_model)
         total_steps = int(self.trainer.estimated_stepping_batches)
 
         return configure_adamw_scheduler(
             self,
             optimizer_cfg=opt_cfg,
-            d_model=d_model,
             total_steps=total_steps,
         )
 
@@ -209,7 +207,10 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         out = self.forward(feats, feat_lens, decoder_input=None)
 
         loss = self.ctc_loss(
-            out.ctc_log_probs.transpose(0, 1), targets, out.out_lengths, target_lengths
+            out.ctc_log_probs.float().transpose(0, 1),
+            targets,
+            out.out_lengths,
+            target_lengths,
         )
         self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=audio.size(0))
 

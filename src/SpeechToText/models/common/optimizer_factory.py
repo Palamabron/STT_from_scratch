@@ -17,7 +17,6 @@ def configure_adamw_scheduler(
     module: nn.Module,
     *,
     optimizer_cfg: Any,
-    d_model: int,
     total_steps: int,
 ) -> OptimizerLRSchedulerConfig:
     """Configure AdamW with Noam or cosine-warmup schedule from ``optimizer_cfg``."""
@@ -40,4 +39,4 @@ def configure_adamw_scheduler(
             **common,
         )
 
-    return configure_adamw_noam(module, d_model=d_model, **common)
+    return configure_adamw_noam(module, **common)
