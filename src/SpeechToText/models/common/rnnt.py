@@ -190,7 +190,7 @@ def rnnt_loss_mean(
     ).to(dtype=torch.int32)
 
     loss_any = rnnt_loss(
-        logits=logits,
+        logits=logits.float(),
         targets=targets_2d,
         logit_lengths=out_lengths.to(dtype=torch.int32),
         target_lengths=target_lengths.to(dtype=torch.int32),
