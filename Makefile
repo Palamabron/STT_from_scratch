@@ -573,6 +573,7 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 		--max_epochs 100 \
 		--checkpoint_dir checkpoints/tdt_4090_65m \
 		--ckpt_path $(TDT_65M_INIT) \
+		--reset_optimizer_state \
 		--use-tdt \
 		--tdt_sigma 0.05 \
 		--tdt_omega 0.1 \
