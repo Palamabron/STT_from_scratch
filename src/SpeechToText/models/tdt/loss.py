@@ -81,7 +81,9 @@ def compute_tdt_losses(
     """Compute RNN-T or TDT (token + duration) training losses."""
     out_lengths_i = out_lengths.to(dtype=torch.long).clamp(min=1, max=int(token_logits.size(1)))
     target_lengths_i = target_lengths.to(dtype=torch.long)
-    max_time = int(out_lengths_i.max().item()) if out_lengths_i.numel() else int(token_logits.size(1))
+    max_time = (
+        int(out_lengths_i.max().item()) if out_lengths_i.numel() else int(token_logits.size(1))
+    )
     max_target = int(target_lengths_i.max().item()) if target_lengths_i.numel() else 0
     label_steps = max_target + 1
 

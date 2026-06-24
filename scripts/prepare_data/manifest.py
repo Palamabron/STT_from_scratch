@@ -376,11 +376,6 @@ def _process_source_streaming_sharded(
             f"(source={dataset_spec.hf_id}/{dataset_spec.config_name}/{dataset_spec.split})"
         )
         handle_underdelivery(underdelivery_policy, msg)
-        if not dataset_spec.use_streaming:
-            save_resume_state_atomic(state_path, cursor, exhausted=True)
-            logger.info(
-                f"{dataset_spec.name}: marked source exhausted after non-streaming full scan"
-            )
 
     return manifest_path
 

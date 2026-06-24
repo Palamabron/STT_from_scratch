@@ -4,17 +4,10 @@ import os
 import warnings
 from typing import Any, cast
 
-import lightning.pytorch as pl
 import tyro
 from dotenv import load_dotenv
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-
-warnings.filterwarnings(
-    "ignore",
-    message=r".*_rnnt_loss has been deprecated.*",
-    category=UserWarning,
-)
 
 from SpeechToText.dataset import create_dataloaders
 from SpeechToText.models.common.train_factory import (
@@ -29,8 +22,16 @@ from SpeechToText.models.tdt.lit import LitFastConformerTDT
 
 load_dotenv()
 
+warnings.filterwarnings(
+    "ignore",
+    message=r".*_rnnt_loss has been deprecated.*",
+    category=UserWarning,
+)
+
 
 def main(config: TrainConfig) -> None:
+    import lightning.pytorch as pl
+
     pl.seed_everything(config.seed, workers=True)
     configure_matmul_precision()
     wire_data_filter_from_model(config)

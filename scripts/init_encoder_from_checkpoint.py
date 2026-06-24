@@ -91,7 +91,9 @@ def main(cfg: InitEncoderConfig) -> None:
     if not encoder_weights:
         raise ValueError(f"No net.encoder.* weights found in {source_path}")
 
-    target_module = _build_target_module(cfg.target, sp=sp, source_ckpt=source_ckpt, use_tdt=cfg.use_tdt)
+    target_module = _build_target_module(
+        cfg.target, sp=sp, source_ckpt=source_ckpt, use_tdt=cfg.use_tdt
+    )
     target_state = target_module.state_dict()
 
     copied = 0

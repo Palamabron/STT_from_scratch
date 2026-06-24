@@ -10,6 +10,7 @@ class TrainBatch(TypedDict):
     audio_length: Tensor
     targets: Tensor
     target_length: Tensor
+    clean_pass: NotRequired[Tensor]
     language: NotRequired[list[str]]
     dataset: NotRequired[list[str]]
 

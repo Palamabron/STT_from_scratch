@@ -65,7 +65,9 @@ def _build_final_from_buckets(
     seen_global: set[str] = set()
     total_duration_sec = 0.0
     max_duration_sec = (
-        float(max_train_hours) * 3600.0 if max_train_hours is not None and max_train_hours > 0 else None
+        float(max_train_hours) * 3600.0
+        if max_train_hours is not None and max_train_hours > 0
+        else None
     )
     hour_cap_reached = False
 
@@ -98,7 +100,10 @@ def _build_final_from_buckets(
                         continue
 
                     duration = float(obj.get("duration", 0.0) or 0.0)
-                    if max_duration_sec is not None and total_duration_sec + duration > max_duration_sec:
+                    if (
+                        max_duration_sec is not None
+                        and total_duration_sec + duration > max_duration_sec
+                    ):
                         hour_cap_reached = True
                         logger.info(
                             "Train hour cap reached at {:.1f} h (limit {:.1f} h); "
