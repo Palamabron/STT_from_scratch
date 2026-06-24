@@ -275,13 +275,6 @@ class LitFastConformerTDT(pl.LightningModule):
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
-        if not self._val_texts_ref:
-            self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
-        else:
-            metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
-            for name, value in metrics.items():
-                self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
-
         log_wandb_worst_val_examples(
             self.logger,
             self._val_examples.worst_first(),
@@ -289,6 +282,13 @@ class LitFastConformerTDT(pl.LightningModule):
             epoch=int(self.current_epoch),
             step=int(self.trainer.global_step),
         )
+
+        if not self._val_texts_ref:
+            self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
+        else:
+            metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
+            for name, value in metrics.items():
+                self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
 
         for lang, pairs in self.examples.pop_all().items():
             if not pairs:

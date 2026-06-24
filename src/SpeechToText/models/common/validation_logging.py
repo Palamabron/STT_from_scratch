@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from jiwer import cer as jiwer_cer
-from loguru import logger
+from loguru import logger as loguru_logger
 
 if TYPE_CHECKING:
     from lightning.pytorch.loggers import WandbLogger
@@ -110,37 +110,45 @@ def _resolve_wandb_logger(logger: object | None) -> WandbLogger | None:
         return logger
     if isinstance(logger, (list, tuple)):
         for item in logger:
-            if isinstance(item, WandbLogger):
-                return item
+            resolved = _resolve_wandb_logger(item)
+            if resolved is not None:
+                return resolved
+    if hasattr(logger, "_loggers"):
+        for item in logger._loggers:
+            resolved = _resolve_wandb_logger(item)
+            if resolved is not None:
+                return resolved
     return None
 
 
-def _build_worst_examples_table(
+def _build_worst_examples_rows(
     examples: list[ValUtteranceRecord],
     *,
     epoch: int,
     sample_rate: int,
-) -> object:
+) -> tuple[list[str], list[list[object]]]:
     import wandb
 
-    table = wandb.Table(
-        columns=["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"],
-    )
+    columns = ["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"]
+    rows: list[list[object]] = []
     for record in examples:
-        table.add_data(
-            epoch,
-            record.dataset,
-            record.language,
-            record.reference,
-            record.hypothesis,
-            record.cer,
-            wandb.Audio(record.audio.numpy(), sample_rate=sample_rate),
+        audio_np = record.audio.float().contiguous().numpy()
+        rows.append(
+            [
+                epoch,
+                record.dataset,
+                record.language,
+                record.reference,
+                record.hypothesis,
+                record.cer,
+                wandb.Audio(audio_np, sample_rate=sample_rate),
+            ]
         )
-    return table
+    return columns, rows
 
 
 def log_wandb_worst_val_examples(
-    logger: object | None,
+    lit_logger: object | None,
     examples: list[ValUtteranceRecord],
     *,
     sample_rate: int,
@@ -151,7 +159,7 @@ def log_wandb_worst_val_examples(
     if not examples:
         return
 
-    wandb_logger = _resolve_wandb_logger(logger)
+    wandb_logger = _resolve_wandb_logger(lit_logger)
     if wandb_logger is None:
         return
 
@@ -159,19 +167,14 @@ def log_wandb_worst_val_examples(
     py_random_state = random.getstate()
     try:
         random.seed()
-        table = _build_worst_examples_table(
+        columns, rows = _build_worst_examples_rows(
             examples,
             epoch=epoch,
             sample_rate=sample_rate,
         )
-        experiment = wandb_logger.experiment
-        payload = {key: table}
-        if step is not None:
-            experiment.log(payload, step=step)
-        else:
-            experiment.log(payload)
+        wandb_logger.log_table(key=key, columns=columns, data=rows, step=step)
     except Exception as exc:
-        logger.warning(
+        loguru_logger.warning(
             "Failed to log {} to W&B (epoch={}, step={}): {}",
             key,
             epoch,

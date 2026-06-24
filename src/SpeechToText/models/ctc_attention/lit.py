@@ -253,6 +253,14 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self._val_examples.reset()
 
     def on_validation_epoch_end(self) -> None:
+        log_wandb_worst_val_examples(
+            self.logger,
+            self._val_examples.worst_first(),
+            sample_rate=int(self.config.data.features.sample_rate),
+            epoch=int(self.current_epoch),
+            step=int(self.trainer.global_step),
+        )
+
         if not self._val_texts_ref:
             self.log("val/wer/overall", 1.0, prog_bar=True, on_epoch=True)
         else:
@@ -265,13 +273,6 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             self._val_examples.blank_fraction(),
             prog_bar=True,
             on_epoch=True,
-        )
-        log_wandb_worst_val_examples(
-            self.logger,
-            self._val_examples.worst_first(),
-            sample_rate=int(self.config.data.features.sample_rate),
-            epoch=int(self.current_epoch),
-            step=int(self.trainer.global_step),
         )
 
         for lang, pairs in self.examples.pop_all().items():
