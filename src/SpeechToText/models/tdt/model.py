@@ -91,12 +91,17 @@ class FastConformerTDT(nn.Module):
         duration_log_probs: torch.Tensor | None = None
         if isinstance(joint_out, tuple):
             token_logits, duration_logits = joint_out
-            log_probs = F.log_softmax(token_logits, dim=-1)
-            duration_log_probs = F.log_softmax(duration_logits, dim=-1)
         else:
             token_logits = joint_out
             duration_logits = None
+
+        if self.training:
+            # Loss path uses raw logits; skip expensive joint log-softmax during training.
+            log_probs = token_logits
+        else:
             log_probs = F.log_softmax(token_logits, dim=-1)
+            if duration_logits is not None:
+                duration_log_probs = F.log_softmax(duration_logits, dim=-1)
 
         return TDTOutput(
             log_probs=log_probs,

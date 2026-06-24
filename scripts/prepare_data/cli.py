@@ -18,6 +18,8 @@ def load_yaml_config(config_path: Path) -> AppConfig:
     hf = raw.get("hf", {"token_env": "HF_TOKEN"})
     datasets_section = raw["datasets"]
 
+    training = raw.get("training", {})
+
     train_specs = [DatasetSpec(**item) for item in datasets_section.get("train", [])]
     val_specs = [DatasetSpec(**item) for item in datasets_section.get("val", [])]
 
@@ -26,6 +28,7 @@ def load_yaml_config(config_path: Path) -> AppConfig:
         run=type(AppConfig().run)(**run),
         hf=type(AppConfig().hf)(**hf),
         datasets=type(AppConfig().datasets)(train=train_specs, val=val_specs),
+        max_train_hours=training.get("max_train_hours"),
     )
 
 

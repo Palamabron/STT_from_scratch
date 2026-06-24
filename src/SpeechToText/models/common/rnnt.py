@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F
 from torchaudio.functional import rnnt_loss
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*_rnnt_loss has been deprecated.*",
+    category=UserWarning,
+)
 
 if TYPE_CHECKING:
     from SpeechToText.models.tdt.decoder import TDTDecoder
@@ -189,14 +196,20 @@ def rnnt_loss_mean(
         else targets_1d_or_2d
     ).to(dtype=torch.int32)
 
-    loss_any = rnnt_loss(
-        logits=logits.float(),
-        targets=targets_2d,
-        logit_lengths=out_lengths.to(dtype=torch.int32),
-        target_lengths=target_lengths.to(dtype=torch.int32),
-        blank=int(blank_id),
-        clamp=float(clamp),
-        reduction="mean",
-        fused_log_softmax=bool(fused_log_softmax),
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*_rnnt_loss has been deprecated.*",
+            category=UserWarning,
+        )
+        loss_any = rnnt_loss(
+            logits=logits.float(),
+            targets=targets_2d,
+            logit_lengths=out_lengths.to(dtype=torch.int32),
+            target_lengths=target_lengths.to(dtype=torch.int32),
+            blank=int(blank_id),
+            clamp=float(clamp),
+            reduction="mean",
+            fused_log_softmax=bool(fused_log_softmax),
+        )
     return cast(torch.Tensor, loss_any)

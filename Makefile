@@ -19,11 +19,16 @@ BATCH_DURATION := 1200
 BATCH_DURATION_OOM := 180
 BATCH_DURATION_ATTN_OOM := 400
 BATCH_DURATION_RNNT_OOM := 800
+BATCH_DURATION_TDT := 400
+BATCH_DURATION_TDT_OOM := 350
 
 CTC_V6_CKPT := checkpoints/ctc_4090_65m_v6/last.ckpt
 CTC_V6_BEST := checkpoints/ctc_4090_65m_v6/017-val_wer=0.39.ckpt
 CTC_V6_BEST_TRAIN := checkpoints/ctc_4090_65m_v6/025-val_wer=0.36.ckpt
-TDT_65M_INIT := checkpoints/tdt_4090_65m/encoder_from_ctc_65m.ckpt
+CTC_V8_CKPT := checkpoints/ctc_4090_65m_v8/last.ckpt
+# After v8 training, set to best epoch ckpt for TDT warm-start (e.g. 042-val_wer=0.32.ckpt)
+CTC_ENCODER_INIT ?= $(CTC_V6_BEST_TRAIN)
+TDT_65M_INIT := checkpoints/tdt_4090_65m/init/encoder_from_ctc_65m.ckpt
 
 TRAIN_PATHS := \
 	--data.manifests.train $(TRAIN_MANIFEST) \
@@ -40,8 +45,8 @@ TRAIN_PATHS_2K := \
 	tokenizer-coverage tokenizer-coverage-2k download-augment-data build-augment-banks \
 	test smoke-train types \
 	train-ctc-4090 train-rnnt-4090 train-ctc-attn-4090 train-tdt-4090 \
-	train-ctc-4090-oom train-ctc-4090-sm train-ctc-4090-65m train-ctc-4090-65m-v2 train-ctc-4090-65m-v3 train-ctc-4090-65m-v4 train-ctc-4090-65m-v5 train-ctc-4090-65m-v6 train-ctc-4090-65m-v6-resume train-ctc-4090-65m-v7 \
-	train-rnnt-4090-oom train-ctc-attn-4090-oom init-tdt-from-ctc-65m train-tdt-4090-65m \
+	train-ctc-4090-oom train-ctc-4090-sm train-ctc-4090-65m train-ctc-4090-65m-v2 train-ctc-4090-65m-v3 train-ctc-4090-65m-v4 train-ctc-4090-65m-v5 train-ctc-4090-65m-v6 train-ctc-4090-65m-v6-resume train-ctc-4090-65m-v7 train-ctc-4090-65m-v8 train-ctc-4090-65m-v8-resume \
+	train-rnnt-4090-oom train-ctc-attn-4090-oom init-tdt-from-ctc-65m train-tdt-4090-65m train-tdt-4090-65m-oom train-tdt-4090-sm train-tdt-4090-sm-oom \
 	init-rnnt-from-ctc init-rnnt-from-ctc-v2 average-checkpoints \
 	ablate-subsample-4x ablate-kenlm-ctc ablate-rnnt-clamp eval-ctc-4090-65m-v5
 
@@ -433,8 +438,9 @@ eval-ctc-4090-65m-v5:
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.evaluate \
 		--checkpoint "$$CKPT" \
 		--tokenizer_model $(SPM_2K) \
-		--train_manifest data/debug/en_one.jsonl \
+		--train_manifest $(VAL_MANIFEST) \
 		--val_manifest $(VAL_MANIFEST) \
+		--splits val \
 		--decode_types greedy beam_kenlm \
 		--kenlm_model $(KENLM_MODEL) \
 		--batch_size 8 \
@@ -551,11 +557,90 @@ train-ctc-4090-65m-v6-resume:
 		--optimizer.cosine_eta_min 1e-5 \
 		--wandb_run_name ctc-4090-65m-v6
 
-init-tdt-from-ctc-65m:
-	@test -f $(CTC_V6_BEST_TRAIN) || (echo "Missing $(CTC_V6_BEST_TRAIN). Train CTC v6 first." && exit 1)
+# 65M CTC from scratch — 80 epochs, full dataset (~3173 steps/ep, ~10–11 min/ep → ~14–15 h total)
+train-ctc-4090-65m-v8 train-ctc-4090-65m-24h: train-ctc-4090-65m-v8
+train-ctc-4090-65m-v8:
+	@test -s data/augment/noise_bank.pt || (echo "Missing data/augment/noise_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -s data/augment/rir_bank.pt || (echo "Missing data/augment/rir_bank.pt. Run: make build-augment-banks" && exit 1)
 	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@test -f $(TRAIN_MANIFEST) || (echo "Missing $(TRAIN_MANIFEST). Run: make prepare-data-800h && make rebuild-manifests-800h" && exit 1)
+	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.ctc.train \
+		$(TRAIN_PATHS_2K) \
+		--precision bf16-mixed \
+		--max_epochs 80 \
+		--log_every_n_steps 50 \
+		--checkpoint_dir checkpoints/ctc_4090_65m_v8 \
+		--model.encoder.d_model 400 \
+		--model.encoder.n_layers 16 \
+		--model.encoder.n_heads 8 \
+		--model.encoder.conv_kernel 9 \
+		--model.aux_layer 8 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
+		--data.loader.train_max_batch_size 64 \
+		--data.loader.num_workers 4 \
+		--data.loader.prefetch-factor 2 \
+		--accumulate_grad_batches 2 \
+		--ctc_label_smoothing 0.0 \
+		--aux_ctc_weight 0.3 \
+		--spec_augment.time_masks 6 \
+		--spec_augment.time_width_fraction 0.10 \
+		--spec_augment_start_epoch 10 \
+		--audio_augment_start_epoch 10 \
+		--audio_augment.heavy_augment_start_epoch 20 \
+		--audio_augment.clean_pass_prob 0.08 \
+		--audio_augment.bg_noise_prob 0.25 \
+		--audio_augment.rir_prob 0.2 \
+		--optimizer.lr 1e-3 \
+		--optimizer.warmup_ratio 0.05 \
+		--optimizer.scheduler cosine \
+		--optimizer.cosine_eta_min 1e-5 \
+		--wandb_run_name ctc-4090-65m-v8
+
+train-ctc-4090-65m-v8-resume:
+	@test -f $(CTC_V8_CKPT) || (echo "Missing $(CTC_V8_CKPT). Run: make train-ctc-4090-65m-v8" && exit 1)
+	@test -s data/augment/noise_bank.pt || (echo "Missing data/augment/noise_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -s data/augment/rir_bank.pt || (echo "Missing data/augment/rir_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@test -f $(TRAIN_MANIFEST) || (echo "Missing $(TRAIN_MANIFEST). Run: make prepare-data-800h && make rebuild-manifests-800h" && exit 1)
+	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.ctc.train \
+		$(TRAIN_PATHS_2K) \
+		--precision bf16-mixed \
+		--max_epochs 80 \
+		--log_every_n_steps 50 \
+		--checkpoint_dir checkpoints/ctc_4090_65m_v8 \
+		--ckpt_path $(CTC_V8_CKPT) \
+		--model.encoder.d_model 400 \
+		--model.encoder.n_layers 16 \
+		--model.encoder.n_heads 8 \
+		--model.encoder.conv_kernel 9 \
+		--model.aux_layer 8 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION) \
+		--data.loader.train_max_batch_size 64 \
+		--data.loader.num_workers 4 \
+		--data.loader.prefetch-factor 2 \
+		--accumulate_grad_batches 2 \
+		--ctc_label_smoothing 0.0 \
+		--aux_ctc_weight 0.3 \
+		--spec_augment.time_masks 6 \
+		--spec_augment.time_width_fraction 0.10 \
+		--spec_augment_start_epoch 10 \
+		--audio_augment_start_epoch 10 \
+		--audio_augment.heavy_augment_start_epoch 20 \
+		--audio_augment.clean_pass_prob 0.08 \
+		--audio_augment.bg_noise_prob 0.25 \
+		--audio_augment.rir_prob 0.2 \
+		--optimizer.lr 1e-3 \
+		--optimizer.warmup_ratio 0.05 \
+		--optimizer.scheduler cosine \
+		--optimizer.cosine_eta_min 1e-5 \
+		--wandb_run_name ctc-4090-65m-v8-resume
+
+init-tdt-from-ctc-65m:
+	@test -f $(CTC_ENCODER_INIT) || (echo "Missing $(CTC_ENCODER_INIT). Train CTC first or set CTC_ENCODER_INIT=..." && exit 1)
+	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@mkdir -p $(dir $(TDT_65M_INIT))
 	cd $(REPO_ROOT) && $(UV) python scripts/init_encoder_from_checkpoint.py \
-		--source-checkpoint $(CTC_V6_BEST_TRAIN) \
+		--source-checkpoint $(CTC_ENCODER_INIT) \
 		--tokenizer-model $(SPM_2K) \
 		--target rnnt \
 		--use-tdt \
@@ -570,7 +655,9 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.tdt.train \
 		$(TRAIN_PATHS_2K) \
 		--precision bf16-mixed \
-		--max_epochs 100 \
+		--max_epochs 50 \
+		--early_stopping_patience 20 \
+		--log_every_n_steps 50 \
 		--checkpoint_dir checkpoints/tdt_4090_65m \
 		--ckpt_path $(TDT_65M_INIT) \
 		--reset_optimizer_state \
@@ -581,16 +668,14 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 		--model.encoder.n_layers 16 \
 		--model.encoder.n_heads 8 \
 		--model.encoder.conv_kernel 9 \
-		--data.loader.train_max_batch_duration $(BATCH_DURATION_RNNT_OOM) \
-		--data.loader.train_max_batch_size 24 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_TDT) \
+		--data.loader.train_max_batch_size 16 \
 		--data.loader.num_workers 4 \
-		--data.loader.no-persistent-workers \
-		--data.loader.prefetch-factor 2 \
+		--data.loader.prefetch-factor 4 \
 		--rnnt_clamp -1.0 \
 		--no-compute-eval-loss \
 		--val_max_symbols_per_t 10 \
-		--joint_fused_batch_size 2 \
-		--no-fused-log-softmax \
+		--joint_fused_batch_size 4 \
 		--spec_augment.time_masks 6 \
 		--spec_augment.time_width_fraction 0.10 \
 		--spec_augment_start_epoch 10 \
@@ -604,6 +689,135 @@ train-tdt-4090-65m: init-tdt-from-ctc-65m
 		--optimizer.scheduler cosine \
 		--optimizer.cosine_eta_min 1e-5 \
 		--wandb_run_name tdt-4090-65m
+
+train-tdt-4090-65m-oom: init-tdt-from-ctc-65m
+	@test -s data/augment/noise_bank.pt || (echo "Missing data/augment/noise_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -s data/augment/rir_bank.pt || (echo "Missing data/augment/rir_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@test -f $(TRAIN_MANIFEST) || (echo "Missing $(TRAIN_MANIFEST). Run: make prepare-data-800h && make rebuild-manifests-800h" && exit 1)
+	@test -f $(TDT_65M_INIT) || (echo "Missing $(TDT_65M_INIT). Run: make init-tdt-from-ctc-65m" && exit 1)
+	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.tdt.train \
+		$(TRAIN_PATHS_2K) \
+		--precision bf16-mixed \
+		--max_epochs 50 \
+		--early_stopping_patience 20 \
+		--log_every_n_steps 50 \
+		--checkpoint_dir checkpoints/tdt_4090_65m \
+		--ckpt_path $(TDT_65M_INIT) \
+		--reset_optimizer_state \
+		--use-tdt \
+		--tdt_sigma 0.05 \
+		--tdt_omega 0.1 \
+		--model.encoder.d_model 400 \
+		--model.encoder.n_layers 16 \
+		--model.encoder.n_heads 8 \
+		--model.encoder.conv_kernel 9 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_TDT_OOM) \
+		--data.loader.train_max_batch_size 12 \
+		--data.loader.num_workers 4 \
+		--data.loader.prefetch-factor 4 \
+		--rnnt_clamp -1.0 \
+		--no-compute-eval-loss \
+		--val_max_symbols_per_t 10 \
+		--joint_fused_batch_size 2 \
+		--spec_augment.time_masks 6 \
+		--spec_augment.time_width_fraction 0.10 \
+		--spec_augment_start_epoch 10 \
+		--audio_augment_start_epoch 10 \
+		--audio_augment.heavy_augment_start_epoch 20 \
+		--audio_augment.clean_pass_prob 0.08 \
+		--audio_augment.bg_noise_prob 0.25 \
+		--audio_augment.rir_prob 0.2 \
+		--optimizer.lr 1e-3 \
+		--optimizer.warmup_ratio 0.05 \
+		--optimizer.scheduler cosine \
+		--optimizer.cosine_eta_min 1e-5 \
+		--wandb_run_name tdt-4090-65m-oom
+
+# ~39M TDT: d320/L14/H8, duration 1200, batch 22, limit 3600 batches/ep (~2h). Shuffled subset each epoch.
+train-tdt-4090-sm:
+	@test -s data/augment/noise_bank.pt || (echo "Missing data/augment/noise_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -s data/augment/rir_bank.pt || (echo "Missing data/augment/rir_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@test -f $(TRAIN_MANIFEST) || (echo "Missing $(TRAIN_MANIFEST). Run: make prepare-data-800h && make rebuild-manifests-800h" && exit 1)
+	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.tdt.train \
+		$(TRAIN_PATHS_2K) \
+		--precision bf16-mixed \
+		--max_epochs 80 \
+		--early_stopping_patience 15 \
+		--limit_train_batches 3600 \
+		--log_every_n_steps 50 \
+		--checkpoint_dir checkpoints/tdt_4090_45m \
+		--use-tdt \
+		--tdt_sigma 0.05 \
+		--tdt_omega 0.1 \
+		--model.encoder.d_model 320 \
+		--model.encoder.n_layers 14 \
+		--model.encoder.n_heads 8 \
+		--model.encoder.conv_kernel 9 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_TDT) \
+		--data.loader.train_max_batch_size 20 \
+		--data.loader.num_workers 4 \
+		--data.loader.prefetch-factor 4 \
+		--rnnt_clamp -1.0 \
+		--no-compute-eval-loss \
+		--val_max_symbols_per_t 10 \
+		--joint_fused_batch_size 4 \
+		--spec_augment.time_masks 6 \
+		--spec_augment.time_width_fraction 0.10 \
+		--spec_augment_start_epoch 10 \
+		--audio_augment_start_epoch 10 \
+		--audio_augment.heavy_augment_start_epoch 20 \
+		--audio_augment.clean_pass_prob 0.08 \
+		--audio_augment.bg_noise_prob 0.25 \
+		--audio_augment.rir_prob 0.2 \
+		--optimizer.lr 1e-3 \
+		--optimizer.warmup_ratio 0.05 \
+		--optimizer.scheduler cosine \
+		--optimizer.cosine_eta_min 1e-5 \
+		--wandb_run_name tdt-4090-45m
+
+train-tdt-4090-sm-oom:
+	@test -s data/augment/noise_bank.pt || (echo "Missing data/augment/noise_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -s data/augment/rir_bank.pt || (echo "Missing data/augment/rir_bank.pt. Run: make build-augment-banks" && exit 1)
+	@test -f $(SPM_2K) || (echo "Missing $(SPM_2K). Run: make train-tokenizer-2k" && exit 1)
+	@test -f $(TRAIN_MANIFEST) || (echo "Missing $(TRAIN_MANIFEST). Run: make prepare-data-800h && make rebuild-manifests-800h" && exit 1)
+	cd $(REPO_ROOT) && PYTHONUNBUFFERED=1 $(UV) python -m SpeechToText.models.tdt.train \
+		$(TRAIN_PATHS_2K) \
+		--precision bf16-mixed \
+		--max_epochs 80 \
+		--early_stopping_patience 15 \
+		--limit_train_batches 3600 \
+		--log_every_n_steps 50 \
+		--checkpoint_dir checkpoints/tdt_4090_45m \
+		--use-tdt \
+		--tdt_sigma 0.05 \
+		--tdt_omega 0.1 \
+		--model.encoder.d_model 320 \
+		--model.encoder.n_layers 14 \
+		--model.encoder.n_heads 8 \
+		--model.encoder.conv_kernel 9 \
+		--data.loader.train_max_batch_duration $(BATCH_DURATION_TDT_OOM) \
+		--data.loader.train_max_batch_size 16 \
+		--data.loader.num_workers 8 \
+		--data.loader.prefetch-factor 4 \
+		--rnnt_clamp -1.0 \
+		--no-compute-eval-loss \
+		--val_max_symbols_per_t 10 \
+		--joint_fused_batch_size 4 \
+		--spec_augment.time_masks 6 \
+		--spec_augment.time_width_fraction 0.10 \
+		--spec_augment_start_epoch 10 \
+		--audio_augment_start_epoch 10 \
+		--audio_augment.heavy_augment_start_epoch 20 \
+		--audio_augment.clean_pass_prob 0.08 \
+		--audio_augment.bg_noise_prob 0.25 \
+		--audio_augment.rir_prob 0.2 \
+		--optimizer.lr 1e-3 \
+		--optimizer.warmup_ratio 0.05 \
+		--optimizer.scheduler cosine \
+		--optimizer.cosine_eta_min 1e-5 \
+		--wandb_run_name tdt-4090-45m-oom
 
 train-rnnt-4090:
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.tdt.train \

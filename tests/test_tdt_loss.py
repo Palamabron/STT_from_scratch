@@ -80,11 +80,10 @@ def test_tdt_path_adds_duration_and_sigma_terms() -> None:
 
 
 def test_sigma_penalty_increases_when_mass_below_one() -> None:
-    log_probs = torch.log(torch.tensor([[[[0.2, 0.2, 0.2, 0.2]]]]))
+    low_mass_logits = torch.full((1, 1, 1, 4), -1.609)
+    high_mass_logits = torch.full((1, 1, 1, 4), -1.386)
     out_lengths = torch.tensor([1], dtype=torch.long)
     target_lengths = torch.tensor([0], dtype=torch.long)
-    low_mass = _sigma_penalty(log_probs, out_lengths, target_lengths)
-
-    normalized = torch.log(torch.tensor([[[[0.25, 0.25, 0.25, 0.25]]]]))
-    high_mass = _sigma_penalty(normalized, out_lengths, target_lengths)
+    low_mass = _sigma_penalty(low_mass_logits, out_lengths, target_lengths)
+    high_mass = _sigma_penalty(high_mass_logits, out_lengths, target_lengths)
     assert low_mass.item() < high_mass.item()

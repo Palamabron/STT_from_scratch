@@ -1,5 +1,5 @@
-# Phase-1 data profile: ~600 h per language (~1200 h train total).
-# Incremental download: make prepare-data-600h (resume via skip_existing + .state.json).
+# Phase-1 data profile: ~709 h train (actual bucket ceilings, no hour cap).
+# Incremental download: make prepare-data-800h (resume via skip_existing + .state.json).
 paths:
   root_dir: "."
   data_dir: "data"
@@ -34,7 +34,7 @@ datasets:
       config_name: "pwr-azon_read-20"
       split: "train"
       lang: "pl"
-      samples: 100000
+      samples: 46601
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -44,7 +44,7 @@ datasets:
       config_name: "fair-mls-20"
       split: "train"
       lang: "pl"
-      samples: 100000
+      samples: 46601
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -54,7 +54,7 @@ datasets:
       config_name: "mozilla-common_voice_15-23"
       split: "train"
       lang: "pl"
-      samples: 100000
+      samples: 46601
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -64,7 +64,7 @@ datasets:
       config_name: "pwr-azon_spont-20"
       split: "train"
       lang: "pl"
-      samples: 100000
+      samples: 46601
       text_col: "ref_orig"
       audio_col: "audio"
       use_streaming: false
@@ -74,7 +74,7 @@ datasets:
       config_name: "pl"
       split: "train"
       lang: "pl"
-      samples: 26000
+      samples: 21427
       text_col: "sentence"
       audio_col: "audio"
       use_streaming: false
@@ -84,7 +84,7 @@ datasets:
       config_name: "polish"
       split: "train"
       lang: "pl"
-      samples: 25000
+      samples: 33043
       text_col: "transcript"
       audio_col: "audio"
       use_streaming: true
@@ -104,7 +104,7 @@ datasets:
       config_name: "en"
       split: "train"
       lang: "en"
-      samples: 64000
+      samples: 26193
       text_col: "sentence"
       audio_col: "audio"
       use_streaming: false
@@ -219,6 +219,5 @@ training:
     vocab_size_2k: 2048
     model_type: unigram
   # Expected totals after rebuild_final_manifests.py:
-  #   train ≈ 319000 (151000 pl + 168000 en), ~600 h per language
-  #   en = librispeech_train (104k) + cv21_en_train (64k); MLS has no English config
+  #   train ≈ 231264 utt (~709 h): bigos 46601 + cv21_pl 21427 + mls 33043 + ls360 104000 + cv21_en 26193
   #   val   ≈ 10545  (5695 pl + 4850 en), val-only buckets, zero train overlap

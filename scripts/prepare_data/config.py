@@ -29,6 +29,7 @@ class Run:
     sample_per_dataset: int | None = None
     max_failures: int = 10000
     num_workers: int | None = None
+    fetch_shards: int | None = None
 
 
 @dataclass
@@ -62,3 +63,4 @@ class AppConfig:
     run: Run = field(default_factory=Run)
     hf: HuggingFace = field(default_factory=HuggingFace)
     datasets: Datasets = field(default_factory=Datasets)
+    max_train_hours: float | None = None

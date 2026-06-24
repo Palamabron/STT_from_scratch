@@ -9,34 +9,49 @@ __all__ = ["compute_tdt_losses", "_masked_uniform_kl"]
 
 
 def _masked_uniform_kl(
-    log_probs: torch.Tensor,
+    *,
+    token_logits: torch.Tensor,
     out_lengths: torch.Tensor,
     target_lengths: torch.Tensor,
     blank_id: int,
     exclude_blank: bool = True,
 ) -> torch.Tensor:
-    batch_size, time_steps, label_steps, vocab_size = log_probs.shape
+    """Uniform KL over valid joint positions; computed per utterance to limit peak memory."""
+    device = token_logits.device
+    batch_size = int(token_logits.size(0))
+    vocab_size = int(token_logits.size(-1))
+    total = torch.zeros((), device=device)
+    count = 0
 
-    time_ids = torch.arange(time_steps, device=log_probs.device).view(1, time_steps, 1, 1)
-    label_ids = torch.arange(label_steps, device=log_probs.device).view(1, 1, label_steps, 1)
-
-    valid_time = time_ids < out_lengths.view(batch_size, 1, 1, 1)
-    valid_label = label_ids < (target_lengths.view(batch_size, 1, 1, 1) + 1)
-    valid = (valid_time & valid_label).squeeze(-1)
-
-    log_probs_valid = log_probs[valid]
-    if log_probs_valid.numel() == 0:
-        return torch.zeros((), device=log_probs.device)
-
+    vocab_mask: torch.Tensor | None = None
+    effective_vocab = vocab_size
     if exclude_blank and 0 <= blank_id < vocab_size and vocab_size > 1:
-        mask = torch.ones(vocab_size, device=log_probs.device, dtype=torch.bool)
-        mask[blank_id] = False
-        log_probs_valid = log_probs_valid[:, mask]
-        effective_vocab = log_probs_valid.size(-1)
+        vocab_mask = torch.ones(vocab_size, device=device, dtype=torch.bool)
+        vocab_mask[blank_id] = False
+        effective_vocab = int(vocab_mask.sum().item())
         if effective_vocab <= 0:
-            return torch.zeros((), device=log_probs.device)
-        uniform = torch.full_like(log_probs_valid, 1.0 / float(effective_vocab))
-    else:
-        uniform = torch.full_like(log_probs_valid, 1.0 / float(vocab_size))
+            return torch.zeros((), device=device)
 
-    return F.kl_div(log_probs_valid, uniform, reduction="batchmean", log_target=False)
+    inv_v = 1.0 / float(effective_vocab)
+
+    for b in range(batch_size):
+        t_max = min(int(out_lengths[b].item()), int(token_logits.size(1)))
+        u_max = min(int(target_lengths[b].item()) + 1, int(token_logits.size(2)))
+        if t_max <= 0 or u_max <= 0:
+            continue
+        chunk_t, chunk_u = 16, 32
+        for t0 in range(0, t_max, chunk_t):
+            t1 = min(t0 + chunk_t, t_max)
+            for u0 in range(0, u_max, chunk_u):
+                u1 = min(u0 + chunk_u, u_max)
+                log_p = F.log_softmax(token_logits[b, t0:t1, u0:u1], dim=-1)
+                if vocab_mask is not None:
+                    log_p = log_p[..., vocab_mask]
+                flat = log_p.reshape(-1, effective_vocab)
+                uniform = flat.new_full((flat.size(0), effective_vocab), inv_v)
+                total = total + F.kl_div(flat, uniform, reduction="sum", log_target=False)
+                count += flat.size(0)
+
+    if count == 0:
+        return torch.zeros((), device=device)
+    return total / float(count)

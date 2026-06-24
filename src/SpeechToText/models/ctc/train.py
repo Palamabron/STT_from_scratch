@@ -21,7 +21,11 @@ from SpeechToText.models.ctc.lit import LitFastConformerCTC
 
 load_dotenv()
 
-warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings(
+    "ignore",
+    message=r".*_rnnt_loss has been deprecated.*",
+    category=UserWarning,
+)
 
 
 def main(config: TrainConfig) -> None:

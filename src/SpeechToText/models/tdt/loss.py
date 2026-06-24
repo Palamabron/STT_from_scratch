@@ -9,20 +9,33 @@ from .typing import TDTLosses
 
 
 def _sigma_penalty(
-    log_probs: torch.Tensor, out_lengths: torch.Tensor, target_lengths: torch.Tensor
+    token_logits: torch.Tensor,
+    out_lengths: torch.Tensor,
+    target_lengths: torch.Tensor,
+    *,
+    chunk_t: int = 16,
+    chunk_u: int = 32,
 ) -> torch.Tensor:
     """Logit under-normalization penalty over valid joint positions."""
-    batch_size, time_steps, label_steps, _ = log_probs.shape
-    time_ids = torch.arange(time_steps, device=log_probs.device).view(1, time_steps, 1)
-    label_ids = torch.arange(label_steps, device=log_probs.device).view(1, 1, label_steps)
-    valid_time = time_ids < out_lengths.view(batch_size, 1, 1)
-    valid_label = label_ids < (target_lengths.view(batch_size, 1, 1) + 1)
-    valid = valid_time & valid_label
-    if not bool(valid.any()):
-        return torch.zeros((), device=log_probs.device)
-    probs = log_probs.exp()
-    mass = probs.sum(dim=-1)
-    return torch.log(mass[valid] + 1e-8).mean()
+    values: list[torch.Tensor] = []
+    batch_size = int(token_logits.size(0))
+    for b in range(batch_size):
+        t_max = min(int(out_lengths[b].item()), int(token_logits.size(1)))
+        u_max = min(int(target_lengths[b].item()) + 1, int(token_logits.size(2)))
+        if t_max <= 0 or u_max <= 0:
+            continue
+        log_mass_rows: list[torch.Tensor] = []
+        for t0 in range(0, t_max, chunk_t):
+            t1 = min(t0 + chunk_t, t_max)
+            row_chunks: list[torch.Tensor] = []
+            for u0 in range(0, u_max, chunk_u):
+                u1 = min(u0 + chunk_u, u_max)
+                row_chunks.append(token_logits[b, t0:t1, u0:u1].logsumexp(dim=-1))
+            log_mass_rows.append(torch.cat(row_chunks, dim=-1))
+        values.append(torch.cat(log_mass_rows, dim=0).mean())
+    if not values:
+        return torch.zeros((), device=token_logits.device)
+    return torch.stack(values).mean()
 
 
 def _duration_supervision_loss(
@@ -33,21 +46,21 @@ def _duration_supervision_loss(
     blank_id: int,
 ) -> torch.Tensor:
     """Weak duration targets: 0 on blank argmax, 1 on token argmax."""
-    batch_size, time_steps, label_steps, _ = duration_logits.shape
-    time_ids = torch.arange(time_steps, device=duration_logits.device).view(1, time_steps, 1)
-    label_ids = torch.arange(label_steps, device=duration_logits.device).view(1, 1, label_steps)
-    valid_time = time_ids < out_lengths.view(batch_size, 1, 1)
-    valid_label = label_ids < (target_lengths.view(batch_size, 1, 1) + 1)
-    valid = (valid_time & valid_label).reshape(-1)
-    if not bool(valid.any()):
+    batch_size = int(duration_logits.size(0))
+    losses: list[torch.Tensor] = []
+    for b in range(batch_size):
+        t_max = min(int(out_lengths[b].item()), int(duration_logits.size(1)))
+        u_max = min(int(target_lengths[b].item()) + 1, int(duration_logits.size(2)))
+        if t_max <= 0 or u_max <= 0:
+            continue
+        token_preds = token_logits[b, :t_max, :u_max].argmax(dim=-1)
+        duration_targets = (token_preds != blank_id).long().clamp(max=duration_logits.size(-1) - 1)
+        flat_logits = duration_logits[b, :t_max, :u_max].reshape(-1, duration_logits.size(-1))
+        flat_targets = duration_targets.reshape(-1)
+        losses.append(F.cross_entropy(flat_logits, flat_targets))
+    if not losses:
         return torch.zeros((), device=duration_logits.device)
-
-    token_preds = torch.argmax(token_logits, dim=-1)
-    duration_targets = (token_preds != blank_id).long().clamp(max=duration_logits.size(-1) - 1)
-    flat_logits = duration_logits.reshape(-1, duration_logits.size(-1))
-    flat_targets = duration_targets.reshape(-1)
-    flat_valid = valid.reshape(-1)
-    return F.cross_entropy(flat_logits[flat_valid], flat_targets[flat_valid])
+    return torch.stack(losses).mean()
 
 
 def compute_tdt_losses(
@@ -87,13 +100,12 @@ def compute_tdt_losses(
         fused_log_softmax=bool(fused_log_softmax),
     )
 
-    log_probs = F.log_softmax(token_logits.float(), dim=-1)
     lsm = torch.zeros((), device=rnnt.device)
     if label_smoothing > 0.0:
         from SpeechToText.models.tdt.steps import _masked_uniform_kl
 
         lsm = _masked_uniform_kl(
-            log_probs=log_probs,
+            token_logits=token_logits,
             out_lengths=out_lengths_i,
             target_lengths=target_lengths_i,
             blank_id=int(blank_id),
@@ -111,7 +123,11 @@ def compute_tdt_losses(
         target_lengths_i,
         blank_id=int(blank_id),
     )
-    sigma = float(tdt_sigma) * _sigma_penalty(log_probs, out_lengths_i, target_lengths_i)
+    sigma = (
+        float(tdt_sigma) * _sigma_penalty(token_logits, out_lengths_i, target_lengths_i)
+        if tdt_sigma > 0.0
+        else torch.zeros((), device=rnnt.device)
+    )
     omega = float(tdt_omega)
     tdt_component = duration_loss + sigma
     blended = omega * rnnt + (1.0 - omega) * tdt_component

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from jiwer import cer as jiwer_cer
+from loguru import logger
 
 if TYPE_CHECKING:
     from lightning.pytorch.loggers import WandbLogger
@@ -114,29 +115,28 @@ def _resolve_wandb_logger(logger: object | None) -> WandbLogger | None:
     return None
 
 
-def _build_worst_examples_rows(
+def _build_worst_examples_table(
     examples: list[ValUtteranceRecord],
     *,
     epoch: int,
     sample_rate: int,
-) -> tuple[list[str], list[list[object]]]:
+) -> object:
     import wandb
 
-    columns = ["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"]
-    rows: list[list[object]] = []
+    table = wandb.Table(
+        columns=["epoch", "dataset", "language", "reference", "hypothesis", "cer", "audio"],
+    )
     for record in examples:
-        rows.append(
-            [
-                epoch,
-                record.dataset,
-                record.language,
-                record.reference,
-                record.hypothesis,
-                record.cer,
-                wandb.Audio(record.audio.numpy(), sample_rate=sample_rate),
-            ],
+        table.add_data(
+            epoch,
+            record.dataset,
+            record.language,
+            record.reference,
+            record.hypothesis,
+            record.cer,
+            wandb.Audio(record.audio.numpy(), sample_rate=sample_rate),
         )
-    return columns, rows
+    return table
 
 
 def log_wandb_worst_val_examples(
@@ -159,11 +159,24 @@ def log_wandb_worst_val_examples(
     py_random_state = random.getstate()
     try:
         random.seed()
-        columns, rows = _build_worst_examples_rows(
+        table = _build_worst_examples_table(
             examples,
             epoch=epoch,
             sample_rate=sample_rate,
         )
-        wandb_logger.log_table(key=key, columns=columns, data=rows, step=step)
+        experiment = wandb_logger.experiment
+        payload = {key: table}
+        if step is not None:
+            experiment.log(payload, step=step)
+        else:
+            experiment.log(payload)
+    except Exception as exc:
+        logger.warning(
+            "Failed to log {} to W&B (epoch={}, step={}): {}",
+            key,
+            epoch,
+            step,
+            exc,
+        )
     finally:
         random.setstate(py_random_state)

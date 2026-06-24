@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import os
+import warnings
 from typing import Any, cast
 
 import lightning.pytorch as pl
 import tyro
 from dotenv import load_dotenv
+
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*_rnnt_loss has been deprecated.*",
+    category=UserWarning,
+)
 
 from SpeechToText.dataset import create_dataloaders
 from SpeechToText.models.common.train_factory import (

@@ -25,4 +25,6 @@ class TrainConfig(BaseTrainConfig):
     use_tdt: bool = False
     tdt_sigma: float = 0.05
     tdt_omega: float = 0.1
+    early_stopping_patience: int | None = None
+    max_epochs: int = 50
     wandb_project: str = os.getenv("WANDB_PROJECT", "multilingual_asr_rnnt")

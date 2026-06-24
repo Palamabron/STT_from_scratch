@@ -8,6 +8,7 @@ from loguru import logger
 
 from .buckets import (
     UnderdeliveryPolicy,
+    all_sources_marked_exhausted,
     assert_bucket_ready,
     count_unique_in_manifest,
     group_by_name,
@@ -26,12 +27,14 @@ def build_train_final_from_buckets(
     individual_manifests_dir: Path,
     output_manifest: Path,
     underdelivery_policy: UnderdeliveryPolicy = UnderdeliveryPolicy.WARN,
+    max_train_hours: float | None = None,
 ) -> None:
     _build_final_from_buckets(
         bucket_specs=bucket_specs,
         individual_manifests_dir=individual_manifests_dir,
         output_manifest=output_manifest,
         underdelivery_policy=underdelivery_policy,
+        max_train_hours=max_train_hours,
     )
 
 
@@ -55,13 +58,22 @@ def _build_final_from_buckets(
     individual_manifests_dir: Path,
     output_manifest: Path,
     underdelivery_policy: UnderdeliveryPolicy,
+    max_train_hours: float | None = None,
 ) -> None:
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
     groups = group_by_name(bucket_specs)
     seen_global: set[str] = set()
+    total_duration_sec = 0.0
+    max_duration_sec = (
+        float(max_train_hours) * 3600.0 if max_train_hours is not None and max_train_hours > 0 else None
+    )
+    hour_cap_reached = False
 
     with output_manifest.open("w", encoding="utf-8") as out:
         for bucket_name, specs in groups.items():
+            if hour_cap_reached:
+                break
+
             target = target_for_bucket(specs)
             bucket_manifest = individual_manifests_dir / f"{bucket_name}.jsonl"
             if not bucket_manifest.exists():
@@ -72,6 +84,9 @@ def _build_final_from_buckets(
                 for line in handle:
                     if kept >= target:
                         break
+                    if hour_cap_reached:
+                        break
+
                     line = line.strip()
                     if not line:
                         continue
@@ -81,15 +96,37 @@ def _build_final_from_buckets(
                         continue
                     if key in seen_global:
                         continue
+
+                    duration = float(obj.get("duration", 0.0) or 0.0)
+                    if max_duration_sec is not None and total_duration_sec + duration > max_duration_sec:
+                        hour_cap_reached = True
+                        logger.info(
+                            "Train hour cap reached at {:.1f} h (limit {:.1f} h); "
+                            "stopping before bucket '{}'",
+                            total_duration_sec / 3600.0,
+                            max_train_hours,
+                            bucket_name,
+                        )
+                        break
+
                     seen_global.add(key)
                     out.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    total_duration_sec += duration
                     kept += 1
 
-            if kept < target:
+            if kept < target and not hour_cap_reached:
                 handle_underdelivery(
                     underdelivery_policy,
                     f"Bucket '{bucket_name}': final manifest kept={kept} target={target}",
                 )
+
+    if max_duration_sec is not None:
+        logger.info(
+            "Train final duration: {:.2f} h (cap {:.1f} h), {} unique utterances",
+            total_duration_sec / 3600.0,
+            max_train_hours,
+            len(seen_global),
+        )
 
 
 def validate_final_manifests(app_config: AppConfig) -> None:
@@ -129,6 +166,13 @@ def run_pipeline(app_config: AppConfig) -> None:
             if have_now >= target:
                 logger.info(
                     f"Train bucket: {bucket_name} OK ({have_now}/{target}) sources={len(specs)}"
+                )
+                continue
+
+            if all_sources_marked_exhausted(manifest_path_for_bucket, specs):
+                logger.info(
+                    f"Train bucket: {bucket_name} underdelivered ({have_now}/{target}) "
+                    f"but all sources exhausted, skipping sources={len(specs)}"
                 )
                 continue
 

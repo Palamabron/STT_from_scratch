@@ -42,6 +42,7 @@ def _load_app_config(config_path: Path) -> AppConfig:
     run = raw["run"]
     hf = raw.get("hf", {"token_env": "HF_TOKEN"})
     datasets_section = raw["datasets"]
+    training = raw.get("training", {})
 
     train_specs = [DatasetSpec(**item) for item in datasets_section.get("train", [])]
     val_specs = [DatasetSpec(**item) for item in datasets_section.get("val", [])]
@@ -51,6 +52,7 @@ def _load_app_config(config_path: Path) -> AppConfig:
         run=type(AppConfig().run)(**run),
         hf=type(AppConfig().hf)(**hf),
         datasets=type(AppConfig().datasets)(train=train_specs, val=val_specs),
+        max_train_hours=training.get("max_train_hours"),
     )
 
 
@@ -117,10 +119,24 @@ def _backup(path: Path, backup_dir: Path) -> None:
 class RebuildConfig:
     config: Path = Path("configs/data.yaml")
     backup: bool = True
+    max_train_hours: float | None = None
+
+
+def _resolve_max_train_hours(cfg: RebuildConfig, raw_training: dict) -> float | None:
+    if cfg.max_train_hours is not None:
+        return cfg.max_train_hours
+    value = raw_training.get("max_train_hours")
+    if value is None:
+        return None
+    return float(value)
 
 
 def main(cfg: RebuildConfig) -> None:
-    app_config = _load_app_config(cfg.config.resolve())
+    config_path = cfg.config.resolve()
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    max_train_hours = _resolve_max_train_hours(cfg, raw.get("training", {}))
+
+    app_config = _load_app_config(config_path)
     root_dir = app_config.paths.root_dir.resolve()
     individual_dir = (root_dir / app_config.paths.individual_manifests_dir).resolve()
     train_out = (root_dir / app_config.paths.final_train_manifest).resolve()
@@ -138,6 +154,7 @@ def main(cfg: RebuildConfig) -> None:
         bucket_specs=app_config.datasets.train,
         individual_manifests_dir=individual_dir,
         output_manifest=train_out,
+        max_train_hours=max_train_hours,
     )
     _build_final_from_buckets(
         bucket_specs=app_config.datasets.val,

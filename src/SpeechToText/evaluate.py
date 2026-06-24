@@ -33,12 +33,13 @@ from SpeechToText.models.common.inference import (
 
 @dataclass
 class EvaluateConfig:
-    """Config for CTC evaluation."""
+    """Config for ASR evaluation (CTC, CTC+Attention, or TDT)."""
 
     checkpoint: str
     tokenizer_model: str
     train_manifest: str
     val_manifest: str
+    splits: tuple[str, ...] = ("train", "val")
     kenlm_model: str | None = None
     device: str = "auto"
     sample_rate: int = 16_000
@@ -425,20 +426,40 @@ def main(config: EvaluateConfig) -> None:
 
     decoder_ctc, decoders_kenlm = build_decoders(config, labels_for_pyctc)
 
-    train_items = load_manifest(config.train_manifest)
-    val_items = load_manifest(config.val_manifest)
-    logger.info(f"Loaded manifests: train={len(train_items)}, val={len(val_items)}")
+    allowed_splits = {"train", "val"}
+    unknown = set(config.splits) - allowed_splits
+    if unknown:
+        raise ValueError(f"Unknown splits {sorted(unknown)}; use train and/or val")
+
+    train_items: list[dict[str, Any]] = []
+    val_items: list[dict[str, Any]] = []
+    if "train" in config.splits:
+        train_items = load_manifest(config.train_manifest)
+    if "val" in config.splits:
+        val_items = load_manifest(config.val_manifest)
+    logger.info(
+        f"Loaded manifests: train={len(train_items)}, val={len(val_items)} "
+        f"(splits={','.join(config.splits)})"
+    )
 
     if config.max_samples_per_split is not None:
-        train_items = train_items[: config.max_samples_per_split]
-        val_items = val_items[: config.max_samples_per_split]
+        if train_items:
+            train_items = train_items[: config.max_samples_per_split]
+        if val_items:
+            val_items = val_items[: config.max_samples_per_split]
         logger.info(
             f"Subsampled to max_samples_per_split={config.max_samples_per_split}: "
             f"train={len(train_items)}, val={len(val_items)}"
         )
 
+    split_items: dict[str, list[dict[str, Any]]] = {}
+    if "train" in config.splits:
+        split_items["train"] = train_items
+    if "val" in config.splits:
+        split_items["val"] = val_items
+
     all_results: list[dict[str, Any]] = []
-    for split_name, items in {"train": train_items, "val": val_items}.items():
+    for split_name, items in split_items.items():
         if not items:
             continue
         logger.info(f"Evaluating {split_name} with {', '.join(config.decode_types)} decoding")

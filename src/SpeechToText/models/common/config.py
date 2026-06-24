@@ -37,6 +37,7 @@ class BaseTrainConfig:
     gradient_clip_val: float = 5.0
     val_check_interval: float = 1.0
     log_every_n_steps: int = 10
+    limit_train_batches: int | float | None = None
     precision: PrecisionType = "32-true"
     wandb_project: str = "multilingual_asr"
     wandb_run_name: str | None = None

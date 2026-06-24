@@ -91,40 +91,43 @@ Backups: `data/manifests/final/backup_<timestamp>/`.
 
 ---
 
-### Step 2b — Scale up to ~600 h per language (phase 1)
+### Step 2b — Scale up to ~800 h train total (phase 1)
 
-Current default [`configs/data.yaml`](configs/data.yaml) caps train at **~326 h** (~163 h EN + ~163 h PL). The research report targets **~1000–1200 h per language**; phase 1 uses [`configs/data_600h.yaml`](configs/data_600h.yaml) for **~600 h/lang (~1200 h total)**.
+Current default [`configs/data.yaml`](configs/data.yaml) caps train at **~326 h** (~163 h EN + ~163 h PL). Phase 1 uses [`configs/data_800h.yaml`](configs/data_800h.yaml) for **~800 h train total** (hard cap in `rebuild-manifests-800h`).
 
-**Disk:** reserve **~100–120 GB** free under `data/audio/` (current ~40 GB at 326 h). Check with `du -sh data/audio` and `df -h .` before starting.
+**Disk:** reserve **~100–120 GB** free under `data/audio/`. Check with `du -sh data/audio` and `df -h .` before starting.
 
 **Download** (incremental, resume-safe via `skip_existing` and `data/manifests/individual/*.state.json`):
 
 ```bash
-make prepare-data-600h          # HF download + fill individual buckets
+make prefetch-hf-800h           # cache CV21 tarballs (avoids Hub 429)
+make prepare-data-800h          # HF download + fill individual buckets
 make analyze-manifests          # hours per language / dataset
-make rebuild-manifests-600h     # cap finals, fix durations, backup old finals
-make analyze-manifests          # verify ~600 h/lang when download complete
+make rebuild-manifests-800h     # cap finals at 800h, fix durations, backup old finals
+make analyze-manifests          # verify ≤800 h when download complete
 ```
 
-Monitor: `tail -f logs/prepare_data_600h.log`
+`prepare-data-800h` uses **2 parallel HF fetch shards** (`PREPARE_DATA_FETCH_SHARDS=2`) plus 16 process workers.
 
 | Train bucket | Target samples | ~hours |
 |--------------|----------------|--------|
-| `bigos_v2_train` (+ spont) | 100k | ~390 PL |
-| `mls_pl_train` | 25k | ~104 PL |
-| `cv21_pl_train` | 26k | ~100 PL |
+| `bigos_v2_train` (+ spont) | 47k | ~PL |
+| `mls_pl_train` | 44k | ~PL |
+| `cv21_pl_train` | 26k | ~PL |
 | `librispeech_train` (train.360) | 104k | ~360 EN |
-| `mls_en_train` | 34k | ~150 EN |
-| `cv21_en_train` | 30k | ~90 EN |
+| `cv21_en_train` | 64k | ~EN |
 
-After rebuild — retrain tokenizer and start v6 (separate from v5 on old data):
+After rebuild — retrain tokenizer and start v6 (from scratch on 800h data):
 
 ```bash
 make train-tokenizer-2k
+make tokenizer-coverage-2k
 make train-ctc-4090-65m-v6
 ```
 
-**Phase 2** (optional, toward full 1000 h/lang): `configs/data_2k.yaml` — full BIGOS (~669 h), LibriSpeech train.960, VoxPopuli with utterance segmentation (long recordings exceed `max_duration=16 s`).
+Legacy 600 h/lang profile: [`configs/data_600h.yaml`](configs/data_600h.yaml) + `make prepare-data-600h`.
+
+**Phase 2** (optional, toward larger corpora): `configs/data_2k.yaml` — full BIGOS (~669 h), LibriSpeech train.960, VoxPopuli with utterance segmentation (long recordings exceed `max_duration=16 s`).
 
 ---
 

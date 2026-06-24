@@ -7,6 +7,7 @@ from pathlib import Path
 from loguru import logger
 
 from .config import DatasetSpec
+from .hf_loader import load_resume_state, state_path_for_source
 
 
 class UnderdeliveryPolicy(Enum):
@@ -57,6 +58,17 @@ def load_existing_keys(manifest_path: Path) -> set[str]:
 
 def count_unique_in_manifest(manifest_path: Path) -> int:
     return len(load_existing_keys(manifest_path))
+
+
+def all_sources_marked_exhausted(manifest_path: Path, specs: list[DatasetSpec]) -> bool:
+    """True when every source in a bucket was fully scanned with no samples left."""
+    if not specs:
+        return False
+    for spec in specs:
+        state = load_resume_state(state_path_for_source(manifest_path, spec))
+        if not state.get("exhausted"):
+            return False
+    return True
 
 
 def assert_bucket_ready(

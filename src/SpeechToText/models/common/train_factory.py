@@ -7,6 +7,7 @@ import lightning.pytorch as pl
 import torch
 from lightning.pytorch.callbacks import (
     Callback,
+    EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
     StochasticWeightAveraging,
@@ -99,7 +100,12 @@ def build_training_logger(config: TrainRunConfig) -> Logger:
         project=str(getattr(config, "wandb_project", "multilingual_asr")),
         name=getattr(config, "wandb_run_name", None),
         log_model=False,
-        settings=wandb.Settings(console="off"),
+        settings=wandb.Settings(
+            console="off",
+            init_timeout=120,
+            x_graphql_timeout_seconds=60,
+            x_file_transfer_timeout_seconds=120,
+        ),
     )
 
 
@@ -156,6 +162,17 @@ def build_trainer(
             ),
         )
 
+    early_stopping_patience = getattr(config, "early_stopping_patience", None)
+    if early_stopping_patience is not None and int(early_stopping_patience) > 0:
+        callbacks.append(
+            EarlyStopping(
+                monitor=monitor,
+                mode="min",
+                patience=int(early_stopping_patience),
+                verbose=True,
+            ),
+        )
+
     return pl.Trainer(
         max_epochs=config.max_epochs,
         logger=logger,
@@ -164,6 +181,7 @@ def build_trainer(
         devices=1,
         precision=config.precision,
         log_every_n_steps=config.log_every_n_steps,
+        limit_train_batches=getattr(config, "limit_train_batches", None),
         val_check_interval=config.val_check_interval,
         gradient_clip_val=config.gradient_clip_val,
         gradient_clip_algorithm="norm",

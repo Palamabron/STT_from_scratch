@@ -16,6 +16,7 @@ import torch
 import torchaudio
 from datasets import DownloadConfig, get_dataset_split_names
 from datasets.utils.file_utils import xopen as hf_xopen
+from loguru import logger
 
 from .config import DatasetSpec
 
@@ -72,14 +73,28 @@ def _safe_audio_suffix(audio_value: dict[str, Any]) -> str:
     return ".audio"
 
 
-def _try_get_duration_seconds(audio_path: Path) -> float | None:
+def duration_seconds(audio_path: Path) -> float | None:
+    """Read audio duration from file headers (torchaudio, then soundfile fallback)."""
     try:
         info = torchaudio.info(str(audio_path))
-        if info.sample_rate and info.num_frames:
-            return float(info.num_frames / info.sample_rate)
-        return None
+        sr = getattr(info, "sample_rate", 0) or 0
+        nf = getattr(info, "num_frames", 0) or 0
+        if sr > 0 and nf > 0:
+            return float(nf / sr)
+    except Exception:
+        pass
+
+    try:
+        with sf.SoundFile(str(audio_path)) as handle:
+            if handle.samplerate <= 0:
+                return None
+            return float(handle.frames / handle.samplerate)
     except Exception:
         return None
+
+
+def _try_get_duration_seconds(audio_path: Path) -> float | None:
+    return duration_seconds(audio_path)
 
 
 def _safe_tag(value: str) -> str:
@@ -117,6 +132,79 @@ def _materialize_raw_audio(
             return output_path, _try_get_duration_seconds(output_path)
 
     raise TypeError("Audio value missing usable bytes/path")
+
+
+def is_hf_rate_limit_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a HuggingFace Hub 429 rate-limit error."""
+    try:
+        from huggingface_hub.errors import HfHubHTTPError
+
+        if isinstance(exc, HfHubHTTPError):
+            response = getattr(exc, "response", None)
+            if response is not None and getattr(response, "status_code", None) == 429:
+                return True
+    except ImportError:
+        pass
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if "429" in message or "too many requests" in message or "rate limit" in message:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def next_sample_with_hf_retry(
+    iterator,
+    *,
+    label: str,
+    shard_idx: int | None = None,
+    max_attempts: int = 24,
+    initial_backoff_sec: float = 45.0,
+    max_backoff_sec: float = 330.0,
+):
+    """Fetch the next HF streaming sample, backing off on Hub 429 rate limits."""
+    import time
+
+    attempt = 0
+    while True:
+        try:
+            return next(iterator)
+        except StopIteration:
+            raise
+        except Exception as exc:
+            if not is_hf_rate_limit_error(exc) or attempt >= max_attempts:
+                raise
+            wait = min(initial_backoff_sec * (2**attempt), max_backoff_sec)
+            shard_note = f" shard={shard_idx}" if shard_idx is not None else ""
+            logger.warning(
+                f"{label}{shard_note}: HF rate limit, sleeping {wait:.0f}s "
+                f"(retry {attempt + 1}/{max_attempts})"
+            )
+            time.sleep(wait)
+            attempt += 1
+
+
+def shard_streaming_dataset(dataset_obj: Any, num_shards: int, shard_idx: int) -> Any:
+    """Split a streaming HF dataset across parallel fetch workers by data-source shard."""
+    from datasets.iterable_dataset import IterableDataset
+
+    if num_shards <= 1:
+        return dataset_obj
+
+    sharded_ex = dataset_obj._ex_iterable.shard_data_sources(shard_idx, num_shards)
+    return IterableDataset(
+        sharded_ex,
+        info=dataset_obj.info,
+        split=dataset_obj.split,
+        formatting=dataset_obj._formatting,
+        shuffling=dataset_obj._shuffling,
+        distributed=dataset_obj._distributed,
+        token_per_repo_id=dataset_obj._token_per_repo_id,
+    )
 
 
 def load_hf_dataset(dataset_spec: DatasetSpec, hf_token: str | None, shuffle_seed: int):
@@ -166,20 +254,30 @@ def state_path_for_source(manifest_path: Path, dataset_spec: DatasetSpec) -> Pat
     return manifest_path.with_suffix(f".{source_id}.state.json")
 
 
-def load_resume_state(path: Path) -> dict[str, int]:
+def load_resume_state(path: Path) -> dict[str, int | bool]:
     if not path.exists():
-        return {"cursor": 0}
+        return {"cursor": 0, "exhausted": False}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         cursor = int(data.get("cursor", 0))
-        return {"cursor": max(cursor, 0)}
+        return {"cursor": max(cursor, 0), "exhausted": bool(data.get("exhausted", False))}
     except Exception:
-        return {"cursor": 0}
+        return {"cursor": 0, "exhausted": False}
 
 
-def save_resume_state_atomic(path: Path, cursor: int) -> None:
+def save_resume_state_atomic(path: Path, cursor: int, *, exhausted: bool | None = None) -> None:
+    payload: dict[str, int | bool] = {"cursor": int(cursor)}
+    if exhausted is not None:
+        payload["exhausted"] = exhausted
+    elif path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            if prev.get("exhausted"):
+                payload["exhausted"] = True
+        except Exception:
+            pass
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps({"cursor": int(cursor)}), encoding="utf-8")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, path)
 
 
@@ -281,8 +379,10 @@ def _process_one_sample(
     if audio_filepath is None:
         return None
 
-    if duration_seconds is None:
-        duration_seconds = 0.0
+    if duration_seconds is None or duration_seconds <= 0.0:
+        if audio_filepath.exists():
+            audio_filepath.unlink(missing_ok=True)
+        return None
 
     source_id = _safe_tag(f"{dataset_spec.config_name}__{dataset_spec.split}")
 
