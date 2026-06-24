@@ -17,7 +17,10 @@ from SpeechToText.models.common import (
     greedy_ctc_decode,
     wer_cer_by_lang,
 )
-from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
+from SpeechToText.models.common.batch_filter import (
+    filter_batch_by_encoder_length,
+    warn_empty_training_batch,
+)
 from SpeechToText.models.common.optimizer_factory import configure_adamw_scheduler
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
@@ -162,6 +165,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
 
         filtered = filter_batch_by_encoder_length(batch, out.out_lengths, target_lengths)
         if filtered is None:
+            warn_empty_training_batch(batch_idx, audio.size(0))
             return None
         if filtered[0] is not batch:
             batch = filtered[0]

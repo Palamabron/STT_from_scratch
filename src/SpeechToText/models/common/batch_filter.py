@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, TypeVar, cast
 
 import torch
+from loguru import logger
 
 BatchT = TypeVar("BatchT")
 
@@ -64,3 +65,12 @@ def filter_batch_by_encoder_length(
         )
 
     return filtered, out_lengths_f, target_lengths_f, valid
+
+
+def warn_empty_training_batch(batch_idx: int, batch_size: int) -> None:
+    """Log when every utterance in a training batch was dropped by length filtering."""
+    logger.warning(
+        "Skipping training batch {} (size={}): all utterances have encoder length < target length",
+        batch_idx,
+        batch_size,
+    )

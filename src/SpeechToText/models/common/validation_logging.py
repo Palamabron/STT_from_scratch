@@ -9,6 +9,8 @@ import torch
 from jiwer import cer as jiwer_cer
 from loguru import logger as loguru_logger
 
+from SpeechToText.models.common.rnnt import TransducerDecodeStats
+
 if TYPE_CHECKING:
     from lightning.pytorch.loggers import WandbLogger
 
@@ -65,6 +67,10 @@ class WorstValExamplesCollector:
         blank_count, total_frames = accumulate_blank_stats(log_probs, out_lengths, blank_id)
         self._blank_count += blank_count
         self._blank_total += total_frames
+
+    def accumulate_transducer_decode_stats(self, stats: TransducerDecodeStats) -> None:
+        self._blank_count += stats.blank_steps
+        self._blank_total += stats.total_steps
 
     def blank_fraction(self) -> float:
         return self._blank_count / max(self._blank_total, 1)

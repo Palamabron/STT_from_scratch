@@ -72,7 +72,7 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
 
 def main(cfg: TranscribeConfig) -> None:
     texts = transcribe_files(cfg, cfg.audio_paths)
-    for path, text in zip(cfg.audio_paths, texts, strict=False):
+    for path, text in zip(cfg.audio_paths, texts, strict=True):
         logger.info("{}: {}", path, text)
 
 

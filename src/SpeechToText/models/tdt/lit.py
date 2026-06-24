@@ -11,9 +11,12 @@ from sentencepiece import SentencePieceProcessor
 from SpeechToText.augmentation import GPUAudioAugmentation, SpecAugment
 from SpeechToText.features import WaveformFeaturizer
 from SpeechToText.models.common import ExamplesBuffer, wer_cer_by_lang
-from SpeechToText.models.common.batch_filter import filter_batch_by_encoder_length
+from SpeechToText.models.common.batch_filter import (
+    filter_batch_by_encoder_length,
+    warn_empty_training_batch,
+)
 from SpeechToText.models.common.optimizer_factory import configure_adamw_scheduler
-from SpeechToText.models.common.rnnt import transducer_greedy_decode_one
+from SpeechToText.models.common.rnnt import TransducerDecodeStats, transducer_greedy_decode_one
 from SpeechToText.models.common.validation_logging import (
     WorstValExamplesCollector,
     log_wandb_worst_val_examples,
@@ -182,6 +185,7 @@ class LitFastConformerTDT(pl.LightningModule):
 
         filtered = self._maybe_filter_batch(batch, out.out_lengths, target_lengths)
         if filtered is None:
+            warn_empty_training_batch(batch_idx, audio.size(0))
             return None
         batch_f, _, _ = filtered
         if batch_f is not batch:
@@ -208,7 +212,13 @@ class LitFastConformerTDT(pl.LightningModule):
         )
         return loss
 
-    def _decode_one_from_encoder(self, enc: torch.Tensor, out_len: int) -> list[int]:
+    def _decode_one_from_encoder(
+        self,
+        enc: torch.Tensor,
+        out_len: int,
+        *,
+        stats: TransducerDecodeStats | None = None,
+    ) -> list[int]:
         return transducer_greedy_decode_one(
             enc.unsqueeze(0) if enc.dim() == 2 else enc,
             out_len,
@@ -216,6 +226,7 @@ class LitFastConformerTDT(pl.LightningModule):
             joint=self.net.joint,
             blank_id=self.blank_id,
             max_symbols_per_t=int(self.config.val_max_symbols_per_t),
+            stats=stats,
         )
 
     def validation_step(self, batch: ValBatch, batch_idx: int) -> None:
@@ -245,7 +256,9 @@ class LitFastConformerTDT(pl.LightningModule):
         pred_texts: list[str] = []
         for index in range(bs):
             out_len = int(out_lengths[index].item())
-            ids = self._decode_one_from_encoder(enc[index], out_len)
+            decode_stats = TransducerDecodeStats()
+            ids = self._decode_one_from_encoder(enc[index], out_len, stats=decode_stats)
+            self._val_examples.accumulate_transducer_decode_stats(decode_stats)
             sp_ids = [
                 token_id - 1 for token_id in ids if token_id != self.blank_id and token_id > 0
             ]
@@ -289,6 +302,13 @@ class LitFastConformerTDT(pl.LightningModule):
             metrics = wer_cer_by_lang(self._val_texts_ref, self._val_texts_pred, self._val_langs)
             for name, value in metrics.items():
                 self.log(f"val/{name}", value, prog_bar=True, on_epoch=True)
+
+        self.log(
+            "val/blank_fraction",
+            self._val_examples.blank_fraction(),
+            prog_bar=True,
+            on_epoch=True,
+        )
 
         for lang, pairs in self.examples.pop_all().items():
             if not pairs:

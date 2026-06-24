@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -16,6 +17,22 @@ warnings.filterwarnings(
 if TYPE_CHECKING:
     from SpeechToText.models.tdt.decoder import TDTDecoder
     from SpeechToText.models.tdt.joint import JointNet
+
+
+@dataclass
+class TransducerDecodeStats:
+    """Greedy transducer decode telemetry (blank decisions vs joint steps)."""
+
+    blank_steps: int = 0
+    total_steps: int = 0
+
+    def record(self, *, is_blank: bool) -> None:
+        self.total_steps += 1
+        if is_blank:
+            self.blank_steps += 1
+
+    def blank_fraction(self) -> float:
+        return self.blank_steps / max(self.total_steps, 1)
 
 
 def targets_1d_to_padded_2d(
@@ -63,6 +80,7 @@ def greedy_rnnt_decode_incremental(
     joint: JointNet,
     blank_id: int,
     max_symbols_per_t: int,
+    stats: TransducerDecodeStats | None = None,
 ) -> list[int]:
     """Greedy RNN-T decode with predictor state updated from the emitted prefix."""
     if enc.dim() != 3 or enc.size(0) != 1:
@@ -82,6 +100,8 @@ def greedy_rnnt_decode_incremental(
         while n_emit < max_symbols_per_t and u < max_u and t < out_length:
             token_log_probs, _ = _joint_step_log_probs(joint, enc[0, t, :], pred[0, u, :])
             token_id = int(torch.argmax(token_log_probs).item())
+            if stats is not None:
+                stats.record(is_blank=token_id == blank_id)
             if token_id == blank_id:
                 break
 
@@ -106,6 +126,7 @@ def greedy_tdt_decode_incremental(
     joint: JointNet,
     blank_id: int,
     max_symbols_per_t: int,
+    stats: TransducerDecodeStats | None = None,
 ) -> list[int]:
     """Greedy TDT decode with frame-skipping and incremental predictor history."""
     if enc.dim() != 3 or enc.size(0) != 1:
@@ -122,6 +143,7 @@ def greedy_tdt_decode_incremental(
 
     while t < out_length and u < max_u:
         n_emit = 0
+        advanced_on_blank = False
         while n_emit < max_symbols_per_t and u < max_u and t < out_length:
             token_log_probs, duration_log_probs = _joint_step_log_probs(
                 joint, enc[0, t, :], pred[0, u, :]
@@ -129,9 +151,12 @@ def greedy_tdt_decode_incremental(
             assert duration_log_probs is not None
 
             token_id = int(torch.argmax(token_log_probs).item())
+            if stats is not None:
+                stats.record(is_blank=token_id == blank_id)
             if token_id == blank_id:
                 duration = int(torch.argmax(duration_log_probs).item())
                 t += max(1, duration + 1)
+                advanced_on_blank = True
                 break
 
             emitted.append(token_id)
@@ -145,7 +170,7 @@ def greedy_tdt_decode_incremental(
             duration = int(torch.argmax(duration_log_probs).item())
             t += max(1, duration + 1)
 
-        if n_emit == 0 and t < out_length:
+        if n_emit == 0 and not advanced_on_blank and t < out_length:
             t += 1
 
     return emitted
@@ -159,6 +184,7 @@ def transducer_greedy_decode_one(
     joint: JointNet,
     blank_id: int,
     max_symbols_per_t: int,
+    stats: TransducerDecodeStats | None = None,
 ) -> list[int]:
     """Greedy transducer decode with incremental predictor history."""
     if joint.duration_out is not None:
@@ -169,6 +195,7 @@ def transducer_greedy_decode_one(
             joint=joint,
             blank_id=blank_id,
             max_symbols_per_t=max_symbols_per_t,
+            stats=stats,
         )
     return greedy_rnnt_decode_incremental(
         enc,
@@ -177,6 +204,7 @@ def transducer_greedy_decode_one(
         joint=joint,
         blank_id=blank_id,
         max_symbols_per_t=max_symbols_per_t,
+        stats=stats,
     )
 
 
