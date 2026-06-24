@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from loguru import logger
+
+from .buckets import (
+    UnderdeliveryPolicy,
+    all_sources_marked_exhausted,
+    assert_bucket_ready,
+    count_unique_in_manifest,
+    group_by_name,
+    handle_underdelivery,
+    target_for_bucket,
+)
+from .config import AppConfig, DatasetSpec
+from .hf_loader import resolve_under_root
+from .manifest import process_train_source, process_val_source
+from .overlap import assert_no_overlap, assert_val_has_no_train_bucket_names
+
+
+def build_train_final_from_buckets(
+    *,
+    bucket_specs: list[DatasetSpec],
+    individual_manifests_dir: Path,
+    output_manifest: Path,
+    underdelivery_policy: UnderdeliveryPolicy = UnderdeliveryPolicy.WARN,
+    max_train_hours: float | None = None,
+) -> None:
+    _build_final_from_buckets(
+        bucket_specs=bucket_specs,
+        individual_manifests_dir=individual_manifests_dir,
+        output_manifest=output_manifest,
+        underdelivery_policy=underdelivery_policy,
+        max_train_hours=max_train_hours,
+    )
+
+
+def build_val_final_from_buckets(
+    *,
+    bucket_specs: list[DatasetSpec],
+    individual_manifests_dir: Path,
+    output_manifest: Path,
+) -> None:
+    _build_final_from_buckets(
+        bucket_specs=bucket_specs,
+        individual_manifests_dir=individual_manifests_dir,
+        output_manifest=output_manifest,
+        underdelivery_policy=UnderdeliveryPolicy.RAISE,
+    )
+
+
+def _build_final_from_buckets(
+    *,
+    bucket_specs: list[DatasetSpec],
+    individual_manifests_dir: Path,
+    output_manifest: Path,
+    underdelivery_policy: UnderdeliveryPolicy,
+    max_train_hours: float | None = None,
+) -> None:
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    groups = group_by_name(bucket_specs)
+    seen_global: set[str] = set()
+    total_duration_sec = 0.0
+    max_duration_sec = (
+        float(max_train_hours) * 3600.0
+        if max_train_hours is not None and max_train_hours > 0
+        else None
+    )
+    hour_cap_reached = False
+
+    with output_manifest.open("w", encoding="utf-8") as out:
+        for bucket_name, specs in groups.items():
+            if hour_cap_reached:
+                break
+
+            target = target_for_bucket(specs)
+            bucket_manifest = individual_manifests_dir / f"{bucket_name}.jsonl"
+            if not bucket_manifest.exists():
+                continue
+
+            kept = 0
+            with bucket_manifest.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if kept >= target:
+                        break
+                    if hour_cap_reached:
+                        break
+
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    key = obj.get("uid") or obj.get("audio_filepath")
+                    if not isinstance(key, str) or not key:
+                        continue
+                    if key in seen_global:
+                        continue
+
+                    duration = float(obj.get("duration", 0.0) or 0.0)
+                    if (
+                        max_duration_sec is not None
+                        and total_duration_sec + duration > max_duration_sec
+                    ):
+                        hour_cap_reached = True
+                        logger.info(
+                            "Train hour cap reached at {:.1f} h (limit {:.1f} h); "
+                            "stopping before bucket '{}'",
+                            total_duration_sec / 3600.0,
+                            max_train_hours,
+                            bucket_name,
+                        )
+                        break
+
+                    seen_global.add(key)
+                    out.write(json.dumps(obj, ensure_ascii=False) + "\n")
+                    total_duration_sec += duration
+                    kept += 1
+
+            if kept < target and not hour_cap_reached:
+                handle_underdelivery(
+                    underdelivery_policy,
+                    f"Bucket '{bucket_name}': final manifest kept={kept} target={target}",
+                )
+
+    if max_duration_sec is not None:
+        logger.info(
+            "Train final duration: {:.2f} h (cap {:.1f} h), {} unique utterances",
+            total_duration_sec / 3600.0,
+            max_train_hours,
+            len(seen_global),
+        )
+
+
+def validate_final_manifests(app_config: AppConfig) -> None:
+    """Ensure train/val finals exist and do not overlap."""
+    root_dir = app_config.paths.root_dir.resolve()
+    train_out = resolve_under_root(root_dir, app_config.paths.final_train_manifest)
+    val_out = resolve_under_root(root_dir, app_config.paths.final_val_manifest)
+    if not train_out.exists() or not val_out.exists():
+        raise FileNotFoundError(
+            "Final manifests missing; expected "
+            f"{train_out} and {val_out}. Run rebuild-manifests after prepare-data."
+        )
+
+    train_bucket_names = set(group_by_name(app_config.datasets.train))
+    assert_no_overlap(train_out, val_out)
+    assert_val_has_no_train_bucket_names(val_out, train_bucket_names)
+    logger.info("Validated train/val final manifests: no overlap detected")
+
+
+def run_pipeline(app_config: AppConfig) -> None:
+    root_dir = app_config.paths.root_dir.resolve()
+
+    audio_root_dir = resolve_under_root(root_dir, app_config.paths.audio_dir)
+    individual_manifests_dir = resolve_under_root(
+        root_dir, app_config.paths.individual_manifests_dir
+    )
+    final_train_manifest = resolve_under_root(root_dir, app_config.paths.final_train_manifest)
+    final_val_manifest = resolve_under_root(root_dir, app_config.paths.final_val_manifest)
+
+    hf_token = os.getenv(app_config.hf.token_env)
+
+    if app_config.run.do_train:
+        for bucket_name, specs in group_by_name(app_config.datasets.train).items():
+            target = target_for_bucket(specs)
+            manifest_path_for_bucket = individual_manifests_dir / f"{bucket_name}.jsonl"
+            have_now = count_unique_in_manifest(manifest_path_for_bucket)
+            if have_now >= target:
+                logger.info(
+                    f"Train bucket: {bucket_name} OK ({have_now}/{target}) sources={len(specs)}"
+                )
+                continue
+
+            if all_sources_marked_exhausted(manifest_path_for_bucket, specs):
+                logger.info(
+                    f"Train bucket: {bucket_name} underdelivered ({have_now}/{target}) "
+                    f"but all sources exhausted, skipping sources={len(specs)}"
+                )
+                continue
+
+            logger.info(
+                f"Train bucket: {bucket_name} target={target} have={have_now} sources={len(specs)}"
+            )
+
+            for spec in specs:
+                have_now = count_unique_in_manifest(manifest_path_for_bucket)
+                if have_now >= target:
+                    break
+                process_train_source(
+                    dataset_spec=spec,
+                    audio_root_dir=audio_root_dir,
+                    manifests_root_dir=individual_manifests_dir,
+                    run_config=app_config.run,
+                    hf_token=hf_token,
+                    requested_samples_override=target,
+                )
+
+        build_train_final_from_buckets(
+            bucket_specs=app_config.datasets.train,
+            individual_manifests_dir=individual_manifests_dir,
+            output_manifest=final_train_manifest,
+        )
+        logger.info(f"Wrote: {final_train_manifest}")
+
+    if app_config.run.do_val:
+        for bucket_name, specs in group_by_name(app_config.datasets.val).items():
+            target = target_for_bucket(specs)
+            manifest_path_for_bucket = individual_manifests_dir / f"{bucket_name}.jsonl"
+            have_now = count_unique_in_manifest(manifest_path_for_bucket)
+            if have_now >= target:
+                logger.info(
+                    f"Val bucket: {bucket_name} OK ({have_now}/{target}) sources={len(specs)}"
+                )
+                continue
+
+            logger.info(
+                f"Val bucket: {bucket_name} target={target} have={have_now} sources={len(specs)}"
+            )
+
+            for spec in specs:
+                have_now = count_unique_in_manifest(manifest_path_for_bucket)
+                if have_now >= target:
+                    break
+                process_val_source(
+                    dataset_spec=spec,
+                    audio_root_dir=audio_root_dir,
+                    manifests_root_dir=individual_manifests_dir,
+                    run_config=app_config.run,
+                    hf_token=hf_token,
+                    requested_samples_override=target,
+                )
+
+            assert_bucket_ready(
+                bucket_name,
+                manifest_path_for_bucket,
+                target,
+                UnderdeliveryPolicy.RAISE,
+            )
+
+        build_val_final_from_buckets(
+            bucket_specs=app_config.datasets.val,
+            individual_manifests_dir=individual_manifests_dir,
+            output_manifest=final_val_manifest,
+        )
+        logger.info(f"Wrote: {final_val_manifest}")
+
+    validate_final_manifests(app_config)
