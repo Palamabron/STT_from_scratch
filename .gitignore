@@ -2,6 +2,8 @@
 data/
 !data/debug/
 !data/debug/**
+!scripts/data/
+!scripts/data/**
 checkpoints/
 wandb/
 media/

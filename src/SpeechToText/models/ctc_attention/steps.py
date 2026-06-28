@@ -24,14 +24,15 @@ def compute_ctc_attn_losses(
     aux_log_probs: torch.Tensor,
     targets: torch.Tensor,
     target_lengths: torch.Tensor,
-    dec_log_probs: torch.Tensor,
-    dec_out: torch.Tensor,
+    dec_log_probs: torch.Tensor | None,
+    dec_out: torch.Tensor | None,
     blank_id: int,
     ctc_label_smoothing: float,
     aux_ctc_weight: float,
     ctc_weight: float,
     autocast_device_type: str,
     attn_loss_fn: torch.nn.Module,
+    include_attn: bool = True,
 ) -> CTCAttnLosses:
     """Compute CTC, auxiliary CTC, and attention decoder losses.
 
@@ -88,12 +89,17 @@ def compute_ctc_attn_losses(
     else:
         aux_ctc = torch.tensor(0.0, device=main_ctc.device)
 
-    batch_size, label_steps, vocab_size = dec_log_probs.shape
-    attn = attn_loss_fn(
-        dec_log_probs.reshape(batch_size * label_steps, vocab_size),
-        dec_out.reshape(batch_size * label_steps),
-    )
+    if include_attn:
+        assert dec_log_probs is not None and dec_out is not None
+        batch_size, label_steps, vocab_size = dec_log_probs.shape
+        attn = attn_loss_fn(
+            dec_log_probs.reshape(batch_size * label_steps, vocab_size),
+            dec_out.reshape(batch_size * label_steps),
+        )
+    else:
+        attn = torch.tensor(0.0, device=main_ctc.device)
 
     ctc_mix = float(ctc_weight)
-    total = ctc_mix * main_ctc + (1.0 - ctc_mix) * attn + float(aux_ctc_weight) * aux_ctc
+    attn_mix = (1.0 - ctc_mix) if include_attn else 0.0
+    total = ctc_mix * main_ctc + attn_mix * attn + float(aux_ctc_weight) * aux_ctc
     return CTCAttnLosses(total=total, ctc_main=main_ctc, ctc_aux=aux_ctc, attn=attn)

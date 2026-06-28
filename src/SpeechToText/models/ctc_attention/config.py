@@ -18,5 +18,10 @@ class TrainConfig(BaseTrainConfig):
     ctc_label_smoothing: float = 0.1
     aux_ctc_weight: float = 0.3
     ctc_weight: float = 0.3
+    freeze_encoder_epochs: int = 0
+    decoder_warmup_epochs: int = 0
+    ctc_calibration_epochs: int = 0
+    freeze_decoder_after_epoch: int | None = None
+    val_decode_mode: str = "ctc_greedy"
     wandb_project: str = os.getenv("WANDB_PROJECT", "multilingual_asr_ctc_attn")
     precision: PrecisionType = "bf16-mixed"

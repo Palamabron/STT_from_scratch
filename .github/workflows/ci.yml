@@ -16,16 +16,16 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra demo
 
       - name: Ruff format
-        run: uv run --extra dev ruff format --check src scripts tests
+        run: uv run --extra dev --extra demo ruff format --check src scripts tests
 
       - name: Ruff lint
-        run: uv run --extra dev ruff check src scripts tests
+        run: uv run --extra dev --extra demo ruff check src scripts tests
 
       - name: Mypy
-        run: uv run --extra dev mypy src
+        run: uv run --extra dev --extra demo mypy src
 
       - name: Pytest
-        run: uv run --extra dev pytest tests/
+        run: uv run --extra dev --extra demo pytest tests/
