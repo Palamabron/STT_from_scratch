@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from pydantic import BaseModel, Field
 
 
-@dataclass(slots=True)
-class StreamingConfig:
+class StreamingConfig(BaseModel):
     """Configuration for real-time streaming ASR."""
 
-    sample_rate: int = 16_000
-    chunk_ms: int = 320  # Size of the processed chunk (320ms)
-    hop_ms: int = 160  # Step size between chunks (160ms)
-    context_ms: int = 1000  # Left context size for conformer state preservation (1000ms)
-    subsampling_factor: int = 8  # Subsampling factor of the FastConformer encoder
-    hop_length_ms: float = 10.0  # Feature extractor hop size in ms
-    max_symbols_per_t: int = 10  # Max transducer expansion steps per time step
+    sample_rate: int = Field(16_000, description="Audio sample rate in Hz.")
+    chunk_ms: int = Field(320, description="Processing chunk duration in milliseconds.")
+    hop_ms: int = Field(160, description="Step duration between processing chunks in milliseconds.")
+    context_ms: int = Field(1000, description="Left context duration for state preservation.")
+    subsampling_factor: int = Field(8, description="Encoder subsampling factor.")
+    hop_length_ms: float = Field(10.0, description="Feature extraction hop size in milliseconds.")
+    max_symbols_per_t: int = Field(10, description="Maximum transducer expansion steps per frame.")
