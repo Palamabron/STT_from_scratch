@@ -177,7 +177,7 @@ export VAL=data/manifests/final/val_final.jsonl
 export SPM=models/spm_unigram_4k_trainval.model
 ```
 
-#### Recommended order (optimized for 24GB GPUs)
+#### Recommended order
 
 | Step | Command | Notes |
 |------|---------|-------|
@@ -186,8 +186,6 @@ export SPM=models/spm_unigram_4k_trainval.model
 | 3 | Train RNN-T with `--ckpt_path` (see below) | Warm-started transducer |
 | 4 | `make train-tdt` | After stable RNN-T baseline |
 | 5 | `make train-ctc-attn` | Optional |
-
-OOM fallbacks: `make train-ctc-oom` (batch duration 180), `train-ctc-4090-sm` (~55M params), `make train-rnnt-oom`, `make train-ctc-attn-oom`.
 
 Hyperparameter reference: `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
 
@@ -333,10 +331,10 @@ tests/                     Unit tests
 | `make train-tokenizer` | Rebuild 4k SPM |
 | `make train-tokenizer-8k` | Balanced EN/PL 8k SPM |
 | `make tokenizer-coverage` | Polish tail-char / unk audit |
-| `make train-ctc` | CTC baseline (aliased, optimized for 24GB GPUs) |
-| `make train-rnnt` | RNN-T baseline (aliased, optimized for 24GB GPUs) |
-| `make train-ctc-attn` | CTC + Attention (aliased, optimized for 24GB GPUs) |
-| `make train-tdt` | True TDT (aliased, optimized for 24GB GPUs) |
+| `make train-ctc` | CTC baseline |
+| `make train-rnnt` | RNN-T baseline |
+| `make train-ctc-attn` | CTC + Attention |
+| `make train-tdt` | True TDT |
 | `make init-rnnt-from-ctc` | CTC encoder -> RNN-T |
 | `make average-checkpoints` | SWA-style average (last N epochs) |
 | `make ablate-subsample-4x` | Subsampling ablation |
