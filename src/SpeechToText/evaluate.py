@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pandas as pd
 import torch
@@ -16,8 +17,16 @@ from sentencepiece import SentencePieceProcessor
 from torch.nn.utils.rnn import pad_sequence
 from tqdm.auto import tqdm
 
-from SpeechToText.dataset import DataConfig, FeatureConfig, ManifestPaths
+from SpeechToText.dataset import (
+    DataConfig,
+    FeatureConfig,
+    FilterConfig,
+    ManifestPaths,
+    _pcm_to_float32,
+    passes_manifest_filters,
+)
 from SpeechToText.models.common.eval_decoding import (
+    MetricKey,
     collect_probs_for_beam,
     compute_wer_cer,
     decode_batch_with_beam,
@@ -25,6 +34,10 @@ from SpeechToText.models.common.eval_decoding import (
 )
 from SpeechToText.models.common.inference import (
     ModelType,
+    ctc_attention_special_tokens,
+    decode_ctc_attention_attention_greedy,
+    decode_ctc_attention_joint_beam,
+    encode_ctc_attention,
     forward_ctc_log_probs,
     load_lit_module,
     transducer_greedy_decode_batch,
@@ -47,6 +60,9 @@ class EvaluateConfig:
     beam_widths: tuple[int, ...] = (32,)
     alphas: tuple[float, ...] = (0.5,)
     betas: tuple[float, ...] = (1.0,)
+    joint_alphas: tuple[float, ...] = (0.3, 0.4, 0.5)
+    joint_beam_widths: tuple[int, ...] = (10,)
+    length_penalties: tuple[float, ...] = (0.0,)
     max_samples_per_split: int | None = None
     audio_key: str = "audio_filepath"
     text_key: str = "text"
@@ -56,6 +72,11 @@ class EvaluateConfig:
     num_workers: int | None = None
     model_type: ModelType = "auto"
     val_max_symbols_per_t: int = 10
+    max_duration: float = 16.0
+    subsampling_factor: int = 8
+    min_speed_factor: float = 0.95
+    seed: int = 42
+    max_beam_workers: int = 8
 
 
 def load_manifest(path: str) -> list[dict[str, Any]]:
@@ -95,7 +116,7 @@ def load_audio(path: str, sample_rate: int) -> torch.Tensor:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)
-    return cast(torch.Tensor, wav.squeeze(0))
+    return _pcm_to_float32(wav.squeeze(0))
 
 
 def build_decoders(
@@ -133,12 +154,121 @@ def build_decoders(
     return decoder_ctc, decoders_kenlm
 
 
-def create_pool(decode_types: tuple[str, ...], num_workers: int) -> mp.pool.Pool | None:
+def create_pool(
+    decode_types: tuple[str, ...], num_workers: int, *, max_workers: int = 8
+) -> mp.pool.Pool | None:
+    """Worker pool for pyctcdecode batch beam search (requires fork, not spawn)."""
     need_pool = any(d in ("beam", "beam_kenlm") for d in decode_types)
     if not need_pool or num_workers <= 0:
         return None
-    ctx = mp.get_context("spawn")
-    return ctx.Pool(processes=num_workers)
+    if "fork" not in mp.get_all_start_methods():
+        logger.warning("fork unavailable on this platform; beam decode runs sequentially")
+        return None
+    worker_count = min(num_workers, max_workers)
+    ctx = mp.get_context("fork")
+    logger.info(f"Beam decode pool: fork, workers={worker_count}")
+    return ctx.Pool(processes=worker_count)
+
+
+def _accumulate_decode_metric(
+    metrics: dict[MetricKey, dict[str, float]],
+    *,
+    decode_type: str,
+    ref: str,
+    hyp: str,
+    lang: str,
+    beam_width: int | None = None,
+    alpha: float | None = None,
+    beta: float | None = None,
+    length_penalty: float | None = None,
+) -> None:
+    wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
+    if werden == 0 and cerden == 0:
+        return
+    for lang_key in ("all", lang):
+        key: MetricKey = (decode_type, beam_width, alpha, beta, length_penalty, lang_key)
+        state = metrics.setdefault(
+            key,
+            {
+                "wer_num": 0.0,
+                "wer_den": 0.0,
+                "cer_num": 0.0,
+                "cer_den": 0.0,
+                "count": 0.0,
+            },
+        )
+        state["wer_num"] += float(wernum)
+        state["wer_den"] += float(werden)
+        state["cer_num"] += float(cernum)
+        state["cer_den"] += float(cerden)
+        state["count"] += 1.0
+
+
+def _decode_hybrid_batch(
+    *,
+    model: torch.nn.Module,
+    enc: torch.Tensor,
+    out_lengths: torch.Tensor,
+    ctc_log_probs: torch.Tensor,
+    refs_batch: list[str],
+    langs_batch: list[str],
+    config: EvaluateConfig,
+    tokenizer: SentencePieceProcessor,
+    metrics: dict[MetricKey, dict[str, float]],
+) -> None:
+    tokens = ctc_attention_special_tokens(model)
+    batch_size = enc.size(0)
+
+    for index in range(batch_size):
+        ref = refs_batch[index]
+        lang = langs_batch[index]
+
+        if "attention_greedy" in config.decode_types:
+            hyp = decode_ctc_attention_attention_greedy(
+                model,
+                enc,
+                out_lengths,
+                index,
+                sp=tokenizer,
+                tokens=tokens,
+            )
+            _accumulate_decode_metric(
+                metrics,
+                decode_type="attention_greedy",
+                ref=ref,
+                hyp=hyp,
+                lang=lang,
+            )
+
+        if "joint_beam" not in config.decode_types:
+            continue
+
+        for beam_width in config.joint_beam_widths:
+            for joint_alpha in config.joint_alphas:
+                for length_penalty in config.length_penalties:
+                    hyp = decode_ctc_attention_joint_beam(
+                        model,
+                        enc,
+                        out_lengths,
+                        ctc_log_probs,
+                        index,
+                        sp=tokenizer,
+                        tokens=tokens,
+                        alpha=float(joint_alpha),
+                        beam_size=int(beam_width),
+                        top_k=int(beam_width),
+                        length_penalty=float(length_penalty),
+                    )
+                    _accumulate_decode_metric(
+                        metrics,
+                        decode_type="joint_beam",
+                        ref=ref,
+                        hyp=hyp,
+                        lang=lang,
+                        beam_width=int(beam_width),
+                        alpha=float(joint_alpha),
+                        length_penalty=float(length_penalty),
+                    )
 
 
 def process_audio_batch(
@@ -155,8 +285,10 @@ def process_audio_batch(
     decoder_ctc: Any | None,
     decoders_kenlm: dict[tuple[float, float], Any],
     pool: mp.pool.Pool | None,
-    metrics: dict[tuple[str, int | None, float | None, float | None, str], dict[str, float]],
+    metrics: dict[MetricKey, dict[str, float]],
     blank_id: int,
+    *,
+    decode_types: tuple[str, ...],
 ) -> None:
     if not audio_tensors:
         return
@@ -182,7 +314,7 @@ def process_audio_batch(
             if werden == 0 and cerden == 0:
                 continue
             for lang_key in ("all", lang):
-                key = ("greedy", None, None, None, lang_key)
+                key = ("greedy", None, None, None, None, lang_key)
                 state = metrics.setdefault(
                     key,
                     {
@@ -199,12 +331,21 @@ def process_audio_batch(
                 state["cer_den"] += float(cerden)
                 state["count"] += 1.0
     else:
+        hybrid_decode = model_type == "ctc_attention" and any(
+            d in decode_types for d in ("attention_greedy", "joint_beam")
+        )
         with torch.inference_mode():
-            batch_log_probs, batch_out_lengths = forward_ctc_log_probs(
-                model, padded_audio, lengths_tensor, model_type
-            )
+            if hybrid_decode:
+                enc, batch_out_lengths, batch_log_probs = encode_ctc_attention(
+                    model, padded_audio, lengths_tensor
+                )
+            else:
+                batch_log_probs, batch_out_lengths = forward_ctc_log_probs(
+                    model, padded_audio, lengths_tensor, model_type
+                )
+                enc = None
 
-        if "greedy" in config.decode_types:
+        if "greedy" in decode_types:
             decode_batch_with_greedy(
                 batch_log_probs=batch_log_probs,
                 batch_lengths=batch_out_lengths,
@@ -215,28 +356,42 @@ def process_audio_batch(
                 metrics=metrics,
             )
 
-        vocab_size_with_blank = len(labels_for_pyctc)
-        probs_list, refs_list, langs_list = collect_probs_for_beam(
-            batch_log_probs=batch_log_probs,
-            batch_lengths=batch_out_lengths,
-            batch_refs=refs_batch,
-            batch_langs=langs_batch,
-            vocab_size_with_blank=vocab_size_with_blank,
-        )
+        if hybrid_decode and enc is not None:
+            _decode_hybrid_batch(
+                model=model,
+                enc=enc,
+                out_lengths=batch_out_lengths,
+                ctc_log_probs=batch_log_probs,
+                refs_batch=refs_batch,
+                langs_batch=langs_batch,
+                config=config,
+                tokenizer=tokenizer,
+                metrics=metrics,
+            )
 
-        decode_batch_with_beam(
-            decode_types=config.decode_types,
-            beam_widths=config.beam_widths,
-            alphas=config.alphas,
-            betas=config.betas,
-            probs_per_example=probs_list,
-            refs=refs_list,
-            langs=langs_list,
-            decoder_ctc=decoder_ctc,
-            decoders_kenlm=decoders_kenlm,
-            pool=pool,
-            metrics=metrics,
-        )
+        if any(d in decode_types for d in ("beam", "beam_kenlm")):
+            vocab_size_with_blank = len(labels_for_pyctc)
+            probs_list, refs_list, langs_list = collect_probs_for_beam(
+                batch_log_probs=batch_log_probs,
+                batch_lengths=batch_out_lengths,
+                batch_refs=refs_batch,
+                batch_langs=langs_batch,
+                vocab_size_with_blank=vocab_size_with_blank,
+            )
+
+            decode_batch_with_beam(
+                decode_types=decode_types,
+                beam_widths=config.beam_widths,
+                alphas=config.alphas,
+                betas=config.betas,
+                probs_per_example=probs_list,
+                refs=refs_list,
+                langs=langs_list,
+                decoder_ctc=decoder_ctc,
+                decoders_kenlm=decoders_kenlm,
+                pool=pool,
+                metrics=metrics,
+            )
 
     audio_tensors.clear()
     audio_lengths.clear()
@@ -256,24 +411,29 @@ def evaluate_split(
     labels_for_pyctc: list[str],
     decoder_ctc: Any | None,
     decoders_kenlm: dict[tuple[float, float], Any],
+    *,
+    decode_types: tuple[str, ...],
+    filter_cfg: FilterConfig,
+    feat_cfg: FeatureConfig,
 ) -> list[dict[str, Any]]:
     if not items:
         return []
 
-    if model_type == "tdt" and "greedy" not in config.decode_types:
+    if model_type == "tdt" and "greedy" not in decode_types:
         logger.warning(
             "RNN-T/TDT evaluation supports only greedy decode; add 'greedy' to --decode_types (got {!r})",
-            config.decode_types,
+            decode_types,
         )
         return []
 
     blank_id = 0
-    metrics: dict[
-        tuple[str, int | None, float | None, float | None, str],
-        dict[str, float],
-    ] = {}
+    metrics: dict[MetricKey, dict[str, float]] = {}
 
-    pool = create_pool(config.decode_types, config.num_workers or 0)
+    pool = create_pool(
+        decode_types,
+        config.num_workers or 0,
+        max_workers=config.max_beam_workers,
+    )
 
     try:
         audio_tensors: list[torch.Tensor] = []
@@ -282,14 +442,29 @@ def evaluate_split(
         langs_batch: list[str] = []
 
         for example in tqdm(items, desc=f"{split_name} [forward+decode]", leave=False):
+            if not passes_manifest_filters(
+                example,
+                sp=tokenizer,
+                filter_cfg=filter_cfg,
+                feat_cfg=feat_cfg,
+                text_key=config.text_key,
+                split=split_name,
+            ):
+                continue
+
             audio_path = example.get(config.audio_key) or example.get("audio_path")
             if audio_path is None:
-                raise KeyError(
-                    f"Example is missing audio path under keys "
-                    f"'{config.audio_key}' or 'audio_path': {example.keys()}",
+                logger.warning(
+                    "Skipping example missing audio path under keys '{}' or 'audio_path'",
+                    config.audio_key,
                 )
+                continue
 
-            text = example[config.text_key]
+            text = example.get(config.text_key)
+            if not isinstance(text, str) or not text.strip():
+                logger.warning("Skipping example with missing or empty text")
+                continue
+
             lang = example.get(config.lang_key, "unknown")
 
             audio = load_audio(str(audio_path), sample_rate)
@@ -315,6 +490,7 @@ def evaluate_split(
                     pool=pool,
                     metrics=metrics,
                     blank_id=blank_id,
+                    decode_types=decode_types,
                 )
 
         if audio_tensors:
@@ -334,6 +510,7 @@ def evaluate_split(
                 pool=pool,
                 metrics=metrics,
                 blank_id=blank_id,
+                decode_types=decode_types,
             )
     finally:
         if pool is not None:
@@ -341,7 +518,7 @@ def evaluate_split(
             pool.join()
 
     rows: list[dict[str, Any]] = []
-    for (decode_type, beam_width, alpha, beta, lang_key), values in metrics.items():
+    for (decode_type, beam_width, alpha, beta, length_penalty, lang_key), values in metrics.items():
         if values["count"] == 0:
             continue
         rows.append(
@@ -352,6 +529,7 @@ def evaluate_split(
                 "beam_width": beam_width,
                 "alpha": alpha,
                 "beta": beta,
+                "length_penalty": length_penalty,
                 "num_samples": int(values["count"]),
                 "wer_num": values["wer_num"],
                 "wer_den": values["wer_den"],
@@ -368,7 +546,7 @@ def build_results_dataframe(results: list[dict[str, Any]]) -> pd.DataFrame:
     df["wer"] = df["wer_num"] / df["wer_den"].clip(lower=1e-8)
     df["cer"] = df["cer_num"] / df["cer_den"].clip(lower=1e-8)
 
-    group_keys = ["language", "decode_type", "beam_width", "alpha", "beta"]
+    group_keys = ["language", "decode_type", "beam_width", "alpha", "beta", "length_penalty"]
     df_full = df.groupby(group_keys, as_index=False).agg(
         {
             "num_samples": "sum",
@@ -410,14 +588,37 @@ def main(config: EvaluateConfig) -> None:
     model.to(device)
     logger.info(f"Loaded model type: {resolved_type}")
 
+    if resolved_type == "ctc_attention":
+        attn_tokens = ctc_attention_special_tokens(model)
+        logger.info(
+            "CTC+Attn token ids: blank={} bos={} eos={} pad={} max_decode_len={}",
+            attn_tokens.blank_id,
+            attn_tokens.bos_id,
+            attn_tokens.eos_id,
+            attn_tokens.pad_id,
+            attn_tokens.max_decode_len,
+        )
+
     if resolved_type == "tdt" and any(d != "greedy" for d in config.decode_types):
         logger.warning("TDT evaluation supports greedy decoding only; ignoring beam decode types")
-        config.decode_types = ("greedy",)
+    decode_types = (
+        ("greedy",)
+        if resolved_type == "tdt" and any(d != "greedy" for d in config.decode_types)
+        else config.decode_types
+    )
+
+    feat_cfg = FeatureConfig(sample_rate=config.sample_rate)
+    filter_cfg = FilterConfig(
+        max_duration=config.max_duration,
+        subsampling_factor=config.subsampling_factor,
+        min_speed_factor=config.min_speed_factor,
+    )
 
     _ = DataConfig(
         manifests=ManifestPaths(train=config.train_manifest, val=config.val_manifest),
         tokenizer_model=config.tokenizer_model,
-        features=FeatureConfig(sample_rate=config.sample_rate),
+        features=feat_cfg,
+        filter=filter_cfg,
     )
 
     labels_for_pyctc = [""] + [tokenizer.id_to_piece(i) for i in range(sp_vocab)]
@@ -443,10 +644,15 @@ def main(config: EvaluateConfig) -> None:
     )
 
     if config.max_samples_per_split is not None:
+        rng = random.Random(config.seed)
         if train_items:
-            train_items = train_items[: config.max_samples_per_split]
+            shuffled = train_items.copy()
+            rng.shuffle(shuffled)
+            train_items = shuffled[: config.max_samples_per_split]
         if val_items:
-            val_items = val_items[: config.max_samples_per_split]
+            shuffled = val_items.copy()
+            rng.shuffle(shuffled)
+            val_items = shuffled[: config.max_samples_per_split]
         logger.info(
             f"Subsampled to max_samples_per_split={config.max_samples_per_split}: "
             f"train={len(train_items)}, val={len(val_items)}"
@@ -462,7 +668,7 @@ def main(config: EvaluateConfig) -> None:
     for split_name, items in split_items.items():
         if not items:
             continue
-        logger.info(f"Evaluating {split_name} with {', '.join(config.decode_types)} decoding")
+        logger.info(f"Evaluating {split_name} with {', '.join(decode_types)} decoding")
         all_results.extend(
             evaluate_split(
                 split_name=split_name,
@@ -476,6 +682,9 @@ def main(config: EvaluateConfig) -> None:
                 labels_for_pyctc=labels_for_pyctc,
                 decoder_ctc=decoder_ctc,
                 decoders_kenlm=decoders_kenlm,
+                decode_types=decode_types,
+                filter_cfg=filter_cfg,
+                feat_cfg=feat_cfg,
             ),
         )
 

@@ -56,6 +56,8 @@ class FileProgressCallback(pl.Callback):
         filled = int(30 * frac)
         bar = "#" * filled + "-" * (30 - filled)
         loss = trainer.callback_metrics.get("train/loss_step")
+        if loss is None:
+            loss = trainer.callback_metrics.get("train/loss")
         loss_s = f"{float(loss):.3f}" if loss is not None else "—"
         print(
             f"Epoch {trainer.current_epoch + 1}/{trainer.max_epochs} "
