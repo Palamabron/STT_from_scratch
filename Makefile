@@ -73,6 +73,7 @@ TRAIN_PATHS_2K := \
 	train-tokenizer train-tokenizer-2k train-tokenizer-8k preview-augmentations \
 	tokenizer-coverage tokenizer-coverage-2k download-augment-data build-augment-banks \
 	test smoke-train types demo \
+	train-ctc train-rnnt train-ctc-attn train-tdt train-ctc-oom train-rnnt-oom train-ctc-attn-oom train-tdt-oom \
 	train-ctc-4090 train-rnnt-4090 train-ctc-attn-4090 train-tdt-4090 \
 	train-ctc-4090-oom train-ctc-4090-sm train-ctc-4090-65m train-ctc-4090-65m-v2 train-ctc-4090-65m-v3 train-ctc-4090-65m-v4 train-ctc-4090-65m-v5 train-ctc-4090-65m-v6 train-ctc-4090-65m-v6-resume train-ctc-4090-65m-v7 train-ctc-4090-65m-v8 train-ctc-4090-65m-v8-resume train-ctc-4090-65m-v9 \
 	train-rnnt-4090-oom train-ctc-attn-4090-oom init-tdt-from-ctc-65m train-tdt-4090-65m train-tdt-4090-65m-oom train-tdt-4090-sm train-tdt-4090-sm-oom \
@@ -263,7 +264,19 @@ smoke-train:
 types:
 	cd $(REPO_ROOT) && $(UV_DEV) mypy src
 
-# --- RTX 4090 presets (see configs/train/*.env for reference values) ---
+# --- General Training Presets (Aliases optimized for 24GB VRAM GPUs like RTX 4090/3090/A100) ---
+
+train-ctc: train-ctc-4090
+train-rnnt: train-rnnt-4090
+train-ctc-attn: train-ctc-attn-4090
+train-tdt: train-tdt-4090
+
+train-ctc-oom: train-ctc-4090-oom
+train-rnnt-oom: train-rnnt-4090-oom
+train-ctc-attn-oom: train-ctc-attn-4090-oom
+train-tdt-oom: train-tdt-4090-sm-oom
+
+# --- Hardware-Specific Implementations (RTX 4090 Reference Presets) ---
 
 train-ctc-4090:
 	cd $(REPO_ROOT) && $(UV) python -m SpeechToText.models.ctc.train \

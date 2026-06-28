@@ -24,7 +24,7 @@ source .venv/bin/activate
 make test                  # optional
 make smoke-train           # optional GPU sanity check
 
-make train-ctc-4090        # main baseline
+make train-ctc             # main baseline (aliased, optimized for 24GB GPUs)
 
 export SPM=models/spm_unigram_4k_trainval.model
 uv run python -m SpeechToText.evaluate \
@@ -177,19 +177,19 @@ export VAL=data/manifests/final/val_final.jsonl
 export SPM=models/spm_unigram_4k_trainval.model
 ```
 
-#### Recommended order (RTX 4090)
+#### Recommended order (optimized for 24GB GPUs)
 
 | Step | Command | Notes |
 |------|---------|-------|
-| 1 | `make train-ctc-4090` | ~40-50 epochs min; watch `val/wer/overall` |
+| 1 | `make train-ctc` | ~40-50 epochs min; watch `val/wer/overall` |
 | 2 | `make init-rnnt-from-ctc` | Copy CTC encoder weights |
 | 3 | Train RNN-T with `--ckpt_path` (see below) | Warm-started transducer |
-| 4 | `make train-tdt-4090` | After stable RNN-T baseline |
-| 5 | `make train-ctc-attn-4090` | Optional |
+| 4 | `make train-tdt` | After stable RNN-T baseline |
+| 5 | `make train-ctc-attn` | Optional |
 
-OOM fallbacks: `train-ctc-4090-oom` (batch duration 180), `train-ctc-4090-sm` (~55M params), `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
+OOM fallbacks: `make train-ctc-oom` (batch duration 180), `train-ctc-4090-sm` (~55M params), `make train-rnnt-oom`, `make train-ctc-attn-oom`.
 
-Hyperparameter reference (RTX 4090): `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
+Hyperparameter reference: `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
 
 #### Warm-start RNN-T from CTC
 
@@ -210,7 +210,7 @@ uv run python -m SpeechToText.models.tdt.train \
   --wandb_run_name rnnt-4090-from-ctc
 ```
 
-Random-init RNN-T (no CTC warm-start): `make train-rnnt-4090`.
+Random-init RNN-T (no CTC warm-start): `make train-rnnt`.
 
 #### Resume
 
@@ -333,10 +333,10 @@ tests/                     Unit tests
 | `make train-tokenizer` | Rebuild 4k SPM |
 | `make train-tokenizer-8k` | Balanced EN/PL 8k SPM |
 | `make tokenizer-coverage` | Polish tail-char / unk audit |
-| `make train-ctc-4090` | CTC baseline |
-| `make train-rnnt-4090` | RNN-T |
-| `make train-ctc-attn-4090` | CTC+Attention |
-| `make train-tdt-4090` | True TDT |
+| `make train-ctc` | CTC baseline (aliased, optimized for 24GB GPUs) |
+| `make train-rnnt` | RNN-T baseline (aliased, optimized for 24GB GPUs) |
+| `make train-ctc-attn` | CTC + Attention (aliased, optimized for 24GB GPUs) |
+| `make train-tdt` | True TDT (aliased, optimized for 24GB GPUs) |
 | `make init-rnnt-from-ctc` | CTC encoder -> RNN-T |
 | `make average-checkpoints` | SWA-style average (last N epochs) |
 | `make ablate-subsample-4x` | Subsampling ablation |
@@ -345,6 +345,8 @@ tests/                     Unit tests
 | `make smoke-train` | GPU overfit sanity |
 | `make demo` | Start interactive Gradio web demo and dashboard |
 | `make test` / `make fmt` / `make types` | CI checks (Pytest, Ruff formatting, MyPy types) |
+
+*Note: All general training targets have hardware-specific counterparts with the `-4090` suffix (e.g. `make train-ctc-4090`) which contain optimized VRAM duration boundaries.*
 
 ---
 
