@@ -11,10 +11,10 @@ _LOG_ZERO = -1e10
 
 
 def _ctc_forward_score(log_probs: torch.Tensor, token_ids: list[int], *, blank_id: int) -> float:
-    """Log P_ctc(label sequence | X) with labels interleaved by blanks.
+    """Computes the log CTC forward score for a given label sequence.
 
-    Loops over label positions (S=2n+1), not vocabulary — OK for beam prefixes.
-    TODO: incremental Pb/Pnb update over time for faster joint beam when needed.
+    Loops over label positions (S=2n+1) interleaved by blanks, allowing
+    efficient forward score calculation over prefix tokens during beam search.
     """
     labels: list[int] = []
     for token_id in token_ids:

@@ -32,12 +32,12 @@ def detect_model_type(checkpoint_path: str) -> ModelType:
 
     if any(key.startswith("net.joint.") for key in keys):
         return "tdt"
-    if any(key.startswith("net.ctc_proj.") for key in keys) or any(
-        key.startswith("net.attention.") for key in keys
+    if any(
+        key.startswith("net.ctc_proj.")
+        or key.startswith("net.attention.")
+        or key.startswith("net.decoder.")
+        for key in keys
     ):
-        return "ctc_attention"
-    if any(key.startswith("net.decoder.") for key in keys):
-        # Could be CTC Attention or TDT (if missing net.joint.), but for now CTC Attention.
         return "ctc_attention"
     if any(key.startswith("net.proj.") for key in keys):
         return "ctc"
