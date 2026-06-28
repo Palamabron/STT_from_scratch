@@ -291,6 +291,21 @@ RNN-T/TDT: add `--model_type tdt --val_max_symbols_per_t 10`.
 
 ---
 
+### Step 8 — Interactive Gradio Web Demo
+
+You can run the interactive multi-tab Gradio web application for real-time file transcription, live microphone streaming (CTC/TDT), and advanced analytics & benchmarks visualization.
+
+```bash
+make demo
+```
+
+The app will launch on `http://127.0.0.1:7860` by default. It features:
+* **Audio File Transcription:** Upload any `.wav`/`.mp3` audio and transcribe it using your trained model checkpoints.
+* **Microphone Streaming:** Record directly from your microphone with low-latency frame-by-frame streaming updates.
+* **Analytics Tab:** Visualizations of WER vs CER, model parameter trade-offs, language asymmetry, and validation history across your experimental runs.
+
+---
+
 ## Project layout
 
 ```
@@ -303,6 +318,7 @@ checkpoints/               Training outputs (gitignored)
 results/eval/              Evaluation CSVs
 scripts/                   Data prep, tokenizer, checkpoint tools
 src/SpeechToText/          Library code
+src/SpeechToText/demo/     Gradio Web Application & Analytics dashboard
 tests/                     Unit tests
 ```
 
@@ -327,7 +343,8 @@ tests/                     Unit tests
 | `make ablate-kenlm-ctc` | Hybrid vs E2E ablation |
 | `make ablate-rnnt-clamp` | clamp sanity |
 | `make smoke-train` | GPU overfit sanity |
-| `make test` / `make fmt` / `make types` | CI checks |
+| `make demo` | Start interactive Gradio web demo and dashboard |
+| `make test` / `make fmt` / `make types` | CI checks (Pytest, Ruff formatting, MyPy types) |
 
 ---
 
@@ -341,3 +358,4 @@ tests/                     Unit tests
 | W&B errors | `--no-use-wandb` |
 | KenLM eval fails | Build `lm/pl_5gram.arpa` separately |
 | Tokenizer mismatch | Same `--data.tokenizer_model` for train and eval |
+| Missing cache HDD | The data prefetching pipeline automatically falls back to your home directory (~/.cache/huggingface) if `/media/kuba/HDD18TB` is not accessible |

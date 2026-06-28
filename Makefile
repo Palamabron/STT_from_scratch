@@ -1,9 +1,15 @@
 UV_DEV := uv run --extra dev
+UV_DEMO := uv run --extra demo
 UV := uv run
 
 REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-# Bulk HF cache on 16TB HDD (udisks: /dev/sdb2 → /media/kuba/HDD18TB).
+
+# HuggingFace Cache Configuration.
+# Falls back gracefully to standard home directory cache (~/.cache/huggingface)
+# if the high-capacity HDD mount (/media/kuba/HDD18TB) is not present.
+DEFAULT_HF_CACHE := $(HOME)/.cache/huggingface
 HF_CACHE_ROOT ?= /media/kuba/HDD18TB/hf_cache
+ACTIVE_HF_CACHE := $(shell if [ -d "$(HF_CACHE_ROOT)" ]; then echo "$(HF_CACHE_ROOT)"; else echo "$(DEFAULT_HF_CACHE)"; fi)
 TRAIN_MANIFEST := data/manifests/final/train_final.jsonl
 VAL_MANIFEST := data/manifests/final/val_final.jsonl
 SPM_4K := models/spm_unigram_4k_trainval.model
@@ -66,7 +72,7 @@ TRAIN_PATHS_2K := \
 .PHONY: fmt prepare-data prepare-data-600h prepare-data-800h prefetch-hf-600h prefetch-hf-800h rebuild-manifests rebuild-manifests-600h rebuild-manifests-800h analyze-manifests \
 	train-tokenizer train-tokenizer-2k train-tokenizer-8k preview-augmentations \
 	tokenizer-coverage tokenizer-coverage-2k download-augment-data build-augment-banks \
-	test smoke-train types \
+	test smoke-train types demo \
 	train-ctc-4090 train-rnnt-4090 train-ctc-attn-4090 train-tdt-4090 \
 	train-ctc-4090-oom train-ctc-4090-sm train-ctc-4090-65m train-ctc-4090-65m-v2 train-ctc-4090-65m-v3 train-ctc-4090-65m-v4 train-ctc-4090-65m-v5 train-ctc-4090-65m-v6 train-ctc-4090-65m-v6-resume train-ctc-4090-65m-v7 train-ctc-4090-65m-v8 train-ctc-4090-65m-v8-resume train-ctc-4090-65m-v9 \
 	train-rnnt-4090-oom train-ctc-attn-4090-oom init-tdt-from-ctc-65m train-tdt-4090-65m train-tdt-4090-65m-oom train-tdt-4090-sm train-tdt-4090-sm-oom \
@@ -85,46 +91,49 @@ prepare-data:
 	cd $(REPO_ROOT) && PYTHONPATH=scripts/data $(UV) python -m scripts.data.prepare_data --config $(DATA_CONFIG)
 
 prepare-data-600h:
-	@test -d $(HF_CACHE_ROOT) || (echo "Mount HDD: udisksctl mount -b /dev/sdb2" && exit 1)
-	@mkdir -p $(HF_CACHE_ROOT)/hub $(HF_CACHE_ROOT)/datasets
-	@echo "HF cache: $(HF_CACHE_ROOT) (hub + datasets on HDD18TB)"
+	@mkdir -p "$(ACTIVE_HF_CACHE)/hub" "$(ACTIVE_HF_CACHE)/datasets"
+	@echo "HF cache: $(ACTIVE_HF_CACHE)"
 	cd $(REPO_ROOT) && PREPARE_DATA_NUM_WORKERS=16 PREPARE_DATA_FETCH_SHARDS=2 \
 		HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=120 \
-		HF_HUB_CACHE=$(HF_CACHE_ROOT)/hub \
-		HF_DATASETS_CACHE=$(HF_CACHE_ROOT)/datasets \
+		HF_HUB_CACHE="$(ACTIVE_HF_CACHE)/hub" \
+		HF_DATASETS_CACHE="$(ACTIVE_HF_CACHE)/datasets" \
 		$(MAKE) prepare-data DATA_CONFIG=configs/data_600h.yaml
 
 prepare-data-800h:
-	@test -d $(HF_CACHE_ROOT) || (echo "Mount HDD: udisksctl mount -b /dev/sdb2" && exit 1)
-	@mkdir -p $(HF_CACHE_ROOT)/hub $(HF_CACHE_ROOT)/datasets
-	@echo "HF cache: $(HF_CACHE_ROOT) (hub + datasets on HDD18TB)"
+	@mkdir -p "$(ACTIVE_HF_CACHE)/hub" "$(ACTIVE_HF_CACHE)/datasets"
+	@echo "HF cache: $(ACTIVE_HF_CACHE)"
 	cd $(REPO_ROOT) && PREPARE_DATA_NUM_WORKERS=16 PREPARE_DATA_FETCH_SHARDS=2 \
 		HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=120 \
-		HF_HUB_CACHE=$(HF_CACHE_ROOT)/hub \
-		HF_DATASETS_CACHE=$(HF_CACHE_ROOT)/datasets \
+		HF_HUB_CACHE="$(ACTIVE_HF_CACHE)/hub" \
+		HF_DATASETS_CACHE="$(ACTIVE_HF_CACHE)/datasets" \
 		$(MAKE) prepare-data DATA_CONFIG=configs/data_800h.yaml
 
 # Prefetch CV21 audio tarballs into HF cache (avoids SSL timeouts during streaming).
 prefetch-hf-600h:
 	@test -f $(REPO_ROOT)/.env || (echo "Missing .env with HF_TOKEN" && exit 1)
-	@test -d $(HF_CACHE_ROOT) || (echo "Mount HDD: udisksctl mount -b /dev/sdb2" && exit 1)
-	@mkdir -p $(HF_CACHE_ROOT)/hub
+	@mkdir -p "$(ACTIVE_HF_CACHE)/hub"
+	@echo "Prefetching using HF cache: $(ACTIVE_HF_CACHE)"
 	cd $(REPO_ROOT) && set -a && . ./.env && set +a && \
 		HF_HUB_DOWNLOAD_TIMEOUT=600 HF_HUB_ETAG_TIMEOUT=120 \
-		HF_HUB_CACHE=$(HF_CACHE_ROOT)/hub \
+		HF_HUB_CACHE="$(ACTIVE_HF_CACHE)/hub" \
 		$(UV) hf download fsicoli/common_voice_21_0 \
 			--repo-type dataset \
 			--include "audio/pl/train/*.tar" "audio/en/train/*.tar" \
 			--max-workers 4
 
 mount-hdd-cache:
-	udisksctl mount -b /dev/sdb2
-	@mkdir -p $(HF_CACHE_ROOT)/hub $(HF_CACHE_ROOT)/datasets
+	@if [ -e /dev/sdb2 ]; then \
+		udisksctl mount -b /dev/sdb2; \
+	else \
+		echo "Device /dev/sdb2 not found. Cannot mount cache HDD."; \
+		exit 1; \
+	fi
+	@mkdir -p "$(HF_CACHE_ROOT)/hub" "$(HF_CACHE_ROOT)/datasets"
 
 # One-time: copy existing hub blobs from home SSD to HDD (skip if hub already on HDD).
 migrate-hf-hub-to-hdd:
-	@test -d $(HF_CACHE_ROOT) || (echo "Run: make mount-hdd-cache" && exit 1)
-	@mkdir -p $(HF_CACHE_ROOT)/hub
+	@test -d "$(HF_CACHE_ROOT)" || (echo "Run: make mount-hdd-cache" && exit 1)
+	@mkdir -p "$(HF_CACHE_ROOT)/hub"
 	@if [ -d "$(HOME)/.cache/huggingface/hub/datasets--fsicoli--common_voice_21_0" ] && [ ! -d "$(HF_CACHE_ROOT)/hub/datasets--fsicoli--common_voice_21_0" ]; then \
 		echo "Copying HF hub (~72G CV21 tars) to $(HF_CACHE_ROOT)/hub ..."; \
 		rsync -a --info=progress2 "$(HOME)/.cache/huggingface/hub/" "$(HF_CACHE_ROOT)/hub/"; \
@@ -227,6 +236,9 @@ preview-augmentations:
 
 test:
 	cd $(REPO_ROOT) && $(UV_DEV) pytest tests/
+
+demo:
+	cd $(REPO_ROOT) && $(UV_DEMO) python -m SpeechToText.demo.app --host 127.0.0.1 --port 7860
 
 smoke-train:
 	cd $(REPO_ROOT) && \

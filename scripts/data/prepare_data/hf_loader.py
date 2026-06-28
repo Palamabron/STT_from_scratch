@@ -116,7 +116,7 @@ def _materialize_raw_audio(
     audio_bytes = audio_value.get("bytes")
     audio_path = audio_value.get("path")
 
-    if isinstance(audio_bytes, (bytes, bytearray)) and len(audio_bytes) > 0:
+    if isinstance(audio_bytes, bytes | bytearray) and len(audio_bytes) > 0:
         output_path.write_bytes(audio_bytes)
         return output_path, _try_get_duration_seconds(output_path)
 
@@ -303,7 +303,7 @@ def _make_sample_uid(
             key = f"path:{p}"
         else:
             b = audio_value.get("bytes")
-            if isinstance(b, (bytes, bytearray)) and len(b) > 0:
+            if isinstance(b, bytes | bytearray) and len(b) > 0:
                 key = "sha1:" + hashlib.sha1(b).hexdigest()
             else:
                 key = f"pos:{global_pos}"
