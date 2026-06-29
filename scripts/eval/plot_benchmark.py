@@ -37,7 +37,7 @@ def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
     """Grouped bar plot comparing WER across models and decode modes on the Overall split."""
     df = get_dataframe(data)
 
-    # Filter for Overall language
+    
     df_overall = df[df["language_name"] == "Overall (EN+PL)"].copy()
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -53,7 +53,7 @@ def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
         linewidth=0.7,
     )
 
-    # Annotate bars with values
+    
     for p in ax.patches:
         height = p.get_height()
         if height > 0:
@@ -83,7 +83,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
     """Plot comparing Polish (PL) vs English (EN) showing language complexity/flexion impact."""
     df = get_dataframe(data)
 
-    # We want to compare PL vs EN for the best decoding mode: Beam Search + KenLM 5-gram
+    
     df_lang = df[
         (df["language_name"].isin(["English (EN)", "Polish (PL)"]))
         & (df["decode_mode_name"] == "Beam Search + KenLM 5-gram")
@@ -91,8 +91,8 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    # Color mapping for English vs Polish (e.g. Red/Blue or similar academic colors)
-    colors = {"English (EN)": "#4a7c59", "Polish (PL)": "#b23b3b"}  # elegant sage and brick red
+    
+    colors = {"English (EN)": "
 
     sns.barplot(
         data=df_lang,
@@ -105,7 +105,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
         linewidth=0.7,
     )
 
-    # Annotate bars
+    
     for p in ax.patches:
         height = p.get_height()
         if height > 0:
@@ -129,7 +129,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
     ax.set_ylim(0, max(df_lang["wer_pct"]) * 1.15)
     ax.legend(title="Target Language", frameon=True, facecolor="white", edgecolor="0.8")
 
-    # Add brief text about inflection impact
+    
     ax.text(
         0.5,
         -0.22,
@@ -138,7 +138,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
         ha="center",
         fontsize=9,
         style="italic",
-        bbox=dict(facecolor="#f9f9f9", edgecolor="0.8", boxstyle="round,pad=0.5"),
+        bbox=dict(facecolor="
     )
 
     sns.despine()
@@ -152,7 +152,7 @@ def plot_wer_vs_cer(data: list[dict] | pd.DataFrame) -> plt.Figure:
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    # Map symbols and colors
+    
     sns.scatterplot(
         data=df,
         x="cer_pct",
@@ -165,7 +165,7 @@ def plot_wer_vs_cer(data: list[dict] | pd.DataFrame) -> plt.Figure:
         alpha=0.85,
     )
 
-    # Fit a reference line (simple linear regression)
+    
     if not df.empty:
         import numpy as np
 
@@ -200,21 +200,21 @@ def main() -> None:
     with open(summary_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    # Ensure figures directory exists
+    
     fig_dir = Path("results/figures")
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Plot and save WER comparison
+    
     fig1 = plot_wer_comparison(data)
     fig1.savefig(fig_dir / "wer_comparison.png", dpi=300)
     plt.close(fig1)
 
-    # 2. Plot and save Language asymmetry
+    
     fig2 = plot_language_asymmetry(data)
     fig2.savefig(fig_dir / "language_asymmetry.png", dpi=300)
     plt.close(fig2)
 
-    # 3. Plot and save WER vs CER
+    
     fig3 = plot_wer_vs_cer(data)
     fig3.savefig(fig_dir / "wer_vs_cer.png", dpi=300)
     plt.close(fig3)
