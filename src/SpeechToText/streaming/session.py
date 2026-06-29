@@ -7,16 +7,14 @@ import torch
 import torch.nn as nn
 from sentencepiece import SentencePieceProcessor
 
+from SpeechToText.models.common.transducer_modules import is_transducer_primary_net
 from SpeechToText.streaming.config import StreamingConfig
 from SpeechToText.streaming.encoder_state import StreamingEncoderState
 from SpeechToText.streaming.latency import LatencyTracker
 from SpeechToText.streaming.streaming_ctc import StreamingCTCDecoder
 from SpeechToText.streaming.streaming_tdt import StreamingTDTDecoder
 
-
-def _is_transducer_net(net: nn.Module) -> bool:
-    """Detect RNN-T/TDT heads without confusing CTC+Attention transformer decoders."""
-    return hasattr(net, "joint") or hasattr(net, "tdt_joint")
+MAX_STREAM_BUFFER_SAMPLES = 16_000 * 60 * 30
 
 
 class StreamingSession:
@@ -34,7 +32,7 @@ class StreamingSession:
         self.latency_tracker = LatencyTracker()
 
         net = getattr(self.model, "net", self.model)
-        if _is_transducer_net(net):
+        if is_transducer_primary_net(net):
             self.decoder: StreamingCTCDecoder | StreamingTDTDecoder = StreamingTDTDecoder(
                 self.model,
                 blank_id=self.blank_id,
@@ -64,6 +62,13 @@ class StreamingSession:
             samples = samples.view(-1)
         self.encoder_state.append_audio(samples)
         self.full_audio_buffer = torch.cat([self.full_audio_buffer, samples.cpu()])
+        if self.full_audio_buffer.numel() > MAX_STREAM_BUFFER_SAMPLES:
+            self.full_audio_buffer = self.full_audio_buffer[-MAX_STREAM_BUFFER_SAMPLES:]
+
+    def drain_pending_steps(self) -> None:
+        """Process every hop currently buffered in the encoder."""
+        while self.encoder_state.has_pending_audio():
+            self.process_step()
 
     def process_step(self) -> str:
         """Process next pending audio step from the buffer.
@@ -122,7 +127,7 @@ class StreamingSession:
             return self.accumulated_text
 
         net = getattr(self.model, "net", self.model)
-        has_attention_decoder = hasattr(net, "decoder") and not _is_transducer_net(net)
+        has_attention_decoder = hasattr(net, "dec_proj")
         has_ctc_head = hasattr(net, "ctc_proj") or hasattr(net, "proj")
         if not has_attention_decoder or not has_ctc_head or self.model_type == "transducer":
             return self.accumulated_text
@@ -150,6 +155,7 @@ class StreamingSession:
 
             self.accumulated_text = rescored_text
             self.emitted_ids = []
+            self.full_audio_buffer = torch.zeros(0, dtype=torch.float32)
             return rescored_text
         except (RuntimeError, ValueError, IndexError, AttributeError) as exc:
             import logging

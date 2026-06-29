@@ -54,6 +54,10 @@ class StreamingEncoderState:
         """Resets the internal raw audio buffer to start a new stream."""
         self.audio_buffer = torch.zeros(0, dtype=torch.float32)
 
+    def has_pending_audio(self) -> bool:
+        """Return True when the buffer holds at least one streaming hop."""
+        return len(self.audio_buffer) >= self.hop_samples
+
     def append_audio(self, samples: torch.Tensor) -> None:
         """Appends raw 1D audio waveform samples to the internal buffer.
 

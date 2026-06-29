@@ -144,7 +144,7 @@ def decode_batch_with_beam(
         for beam_width in beam_widths:
             hyps = _decode_batch(decoder_ctc, probs_per_example, beam_width)
 
-            for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
+            for hyp, ref, lang in zip(hyps, refs, langs, strict=True):
                 wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
                 if werden == 0 and cerden == 0:
                     continue
@@ -177,7 +177,7 @@ def decode_batch_with_beam(
                 for beam_width in beam_widths:
                     hyps = _decode_batch(decoder, probs_per_example, beam_width)
 
-                    for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
+                    for hyp, ref, lang in zip(hyps, refs, langs, strict=True):
                         wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
                         if werden == 0 and cerden == 0:
                             continue

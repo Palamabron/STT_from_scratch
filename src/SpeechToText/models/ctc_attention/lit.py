@@ -362,6 +362,8 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         out_infer = self.forward(feats, feat_lens, decoder_input=None)
 
         val_mode = getattr(self.config, "val_decode_mode", "ctc_greedy")
+        if stage.name == "decoder_warmup":
+            val_mode = "attention_greedy"
         if val_mode == "attention_greedy":
             from SpeechToText.models.common.inference import (
                 ctc_attention_special_tokens,

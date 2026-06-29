@@ -228,14 +228,15 @@ class ManifestDataset(Dataset[dict[str, Any]]):
 
                 duration = _parse_duration(entry.get("duration"))
                 if duration is None:
-                    if self.config.filter.on_bad_duration == "drop":
-                        dropped_bad_dur += 1
+                    if self.config.filter.on_bad_duration == "raise":
+                        raise ValueError(f"Invalid duration in manifest entry: {entry}")
+                    dropped_bad_dur += 1
                     continue
                 if duration > self.config.filter.max_duration:
                     dropped_too_long += 1
                     continue
 
-                audio_path = entry.get("audio_filepath")
+                audio_path = entry.get("audio_filepath") or entry.get("audio_path")
                 text = (entry.get("text") or "").strip()
                 lang = entry.get("language", "unknown")
                 dataset_name = entry.get("dataset", "unknown")
@@ -605,16 +606,17 @@ class DurationBatchSampler(Sampler[list[int]]):
         return sum(1 for _ in self._yield_batches(indices))
 
     def __len__(self) -> int:
+        if self._num_samples == 0:
+            return 0
+
         if self.stratify_by_language and self.languages is not None:
             generator = torch.Generator()
             generator.manual_seed(self.seed + self._epoch if self.shuffle else self.seed)
             by_lang = self._stratified_lang_indices(generator)
-            return max(
-                1, sum(self._count_batches(lang_indices) for lang_indices in by_lang.values())
-            )
+            return sum(self._count_batches(lang_indices) for lang_indices in by_lang.values())
 
         indices = list(range(self._num_samples))
-        return max(1, self._count_batches(indices))
+        return self._count_batches(indices)
 
 
 def _worker_init_fn(worker_id: int) -> None:

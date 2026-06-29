@@ -14,6 +14,39 @@ MUSAN_URL = "https://www.openslr.org/resources/17/musan.tar.gz"
 RIR_URL = "https://www.openslr.org/resources/28/rirs_noises.zip"
 
 
+def _is_safe_archive_member(member_path: Path, dest_dir: Path) -> bool:
+    resolved = (dest_dir / member_path).resolve()
+    return resolved.is_relative_to(dest_dir.resolve())
+
+
+def _extract_tar(path: Path, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest_root = out_dir.resolve()
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            member_path = Path(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Unsafe tar member path: {member.name}")
+            if not _is_safe_archive_member(member_path, dest_root):
+                raise ValueError(f"Tar member escapes destination: {member.name}")
+            archive.extract(member, out_dir)
+
+
+def _extract_zip(path: Path, out_dir: Path) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest_root = out_dir.resolve()
+    with zipfile.ZipFile(path, "r") as archive:
+        for member in archive.infolist():
+            member_path = Path(member.filename)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise ValueError(f"Unsafe zip member path: {member.filename}")
+            if not _is_safe_archive_member(member_path, dest_root):
+                raise ValueError(f"Zip member escapes destination: {member.filename}")
+            archive.extract(member, out_dir)
+
+
 def _download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
@@ -21,18 +54,6 @@ def _download(url: str, dest: Path) -> None:
         return
     logger.info("Downloading {} -> {}", url, dest)
     urllib.request.urlretrieve(url, dest)  # noqa: S310
-
-
-def _extract_tar(path: Path, out_dir: Path) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(path, "r:gz") as archive:
-        archive.extractall(out_dir)
-
-
-def _extract_zip(path: Path, out_dir: Path) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path, "r") as archive:
-        archive.extractall(out_dir)
 
 
 def main() -> None:

@@ -159,83 +159,94 @@ def get_dataset_summary_markdown(stats: dict, split: str = "train") -> str:
 
 
 # Main function to create Gradio tab layout
-def create_analytics_tab() -> gr.Blocks:
+def _safe_benchmark_plot(plot_fn, data: list[dict[str, Any]]) -> plt.Figure | None:
+    try:
+        return plot_fn(data)
+    except (ValueError, KeyError):
+        return None
+
+
+def create_analytics_tab() -> None:
     stats_cache = load_stats()
     benchmark_data = load_benchmark_data()
     benchmark_df = load_benchmark_df()
 
-    with gr.Blocks() as tab:
-        gr.Markdown(
-            "## 📊 ASR Analytics & Offline Benchmark\n"
-            "This tab presents advanced statistics of the training corpus (EN/PL) "
-            "and evaluation results of Conformer-CTC and Hybrid-Attention models on the validation split."
-        )
+    gr.Markdown(
+        "## 📊 ASR Analytics & Offline Benchmark\n"
+        "This tab presents advanced statistics of the training corpus (EN/PL) "
+        "and evaluation results of Conformer-CTC and Hybrid-Attention models on the validation split."
+    )
 
-        with gr.Tab("Dataset Analytics"):
-            if stats_cache is None:
-                gr.Markdown(
-                    "⚠️ Dataset statistics cache not found! Please run `scripts/generate_dataset_stats.py`."
-                )
-            else:
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        split_selector = gr.Radio(
-                            choices=["train", "val"],
-                            value="train",
-                            label="Select Split",
-                        )
-                        summary_box = gr.Markdown(
-                            value=get_dataset_summary_markdown(stats_cache, "train")
-                        )
-
-                    with gr.Column(scale=2):
-                        with gr.Row():
-                            pie_plot = gr.Plot(value=plot_dataset_languages(stats_cache, "train"))
-                            duration_plot = gr.Plot(
-                                value=plot_dataset_duration_hist(stats_cache, "train")
-                            )
-                        with gr.Row():
-                            token_plot = gr.Plot(
-                                value=plot_dataset_token_len_hist(stats_cache, "train")
-                            )
-
-                # Dynamic updates on Radio click
-                def update_dataset_stats(
-                    split: str,
-                ) -> tuple[str, plt.Figure, plt.Figure, plt.Figure]:
-                    return (
-                        get_dataset_summary_markdown(stats_cache, split),
-                        plot_dataset_languages(stats_cache, split),
-                        plot_dataset_duration_hist(stats_cache, split),
-                        plot_dataset_token_len_hist(stats_cache, split),
+    with gr.Tab("Dataset Analytics"):
+        if stats_cache is None:
+            gr.Markdown(
+                "⚠️ Dataset statistics cache not found! Please run `scripts/generate_dataset_stats.py`."
+            )
+        else:
+            with gr.Row():
+                with gr.Column(scale=1):
+                    split_selector = gr.Radio(
+                        choices=["train", "val"],
+                        value="train",
+                        label="Select Split",
+                    )
+                    summary_box = gr.Markdown(
+                        value=get_dataset_summary_markdown(stats_cache, "train")
                     )
 
-                split_selector.change(
-                    update_dataset_stats,
-                    inputs=[split_selector],
-                    outputs=[summary_box, pie_plot, duration_plot, token_plot],
+                with gr.Column(scale=2):
+                    with gr.Row():
+                        pie_plot = gr.Plot(value=plot_dataset_languages(stats_cache, "train"))
+                        duration_plot = gr.Plot(
+                            value=plot_dataset_duration_hist(stats_cache, "train")
+                        )
+                    with gr.Row():
+                        token_plot = gr.Plot(
+                            value=plot_dataset_token_len_hist(stats_cache, "train")
+                        )
+
+            def update_dataset_stats(
+                split: str,
+            ) -> tuple[str, plt.Figure, plt.Figure, plt.Figure]:
+                return (
+                    get_dataset_summary_markdown(stats_cache, split),
+                    plot_dataset_languages(stats_cache, split),
+                    plot_dataset_duration_hist(stats_cache, split),
+                    plot_dataset_token_len_hist(stats_cache, split),
                 )
 
-        with gr.Tab("Offline Benchmark"):
-            if benchmark_data is None or benchmark_df is None:
+            split_selector.change(
+                update_dataset_stats,
+                inputs=[split_selector],
+                outputs=[summary_box, pie_plot, duration_plot, token_plot],
+            )
+
+    with gr.Tab("Offline Benchmark"):
+        if benchmark_data is None or benchmark_df is None:
+            gr.Markdown(
+                "⚠️ Evaluation results not found in `results/benchmark/`! "
+                "Please run `scripts/eval/benchmark_offline.py` first."
+            )
+        else:
+            gr.Markdown("### 🏆 Model Performance Comparison (WER / CER %)")
+
+            gr.DataFrame(
+                value=benchmark_df,
+                interactive=False,
+                wrap=True,
+            )
+
+            gr.Markdown("### 📈 Publication-Ready Comparison Plots")
+            wer_plot = _safe_benchmark_plot(plot_wer_comparison, benchmark_data)
+            lang_plot = _safe_benchmark_plot(plot_language_asymmetry, benchmark_data)
+            scatter_plot = _safe_benchmark_plot(plot_wer_vs_cer, benchmark_data)
+            if wer_plot is None or lang_plot is None or scatter_plot is None:
                 gr.Markdown(
-                    "⚠️ Evaluation results not found in `results/benchmark/`! Please run `scripts/benchmark_offline.py` first."
+                    "⚠️ Benchmark files are present but missing required summary rows for plotting."
                 )
             else:
-                gr.Markdown("### 🏆 Model Performance Comparison (WER / CER %)")
-
-                # Render results in a nice Gradio Dataframe
-                gr.DataFrame(
-                    value=benchmark_df,
-                    interactive=False,
-                    wrap=True,
-                )
-
-                gr.Markdown("### 📈 Publication-Ready Comparison Plots")
                 with gr.Row():
-                    gr.Plot(value=plot_wer_comparison(benchmark_data))
-                    gr.Plot(value=plot_language_asymmetry(benchmark_data))
+                    gr.Plot(value=wer_plot)
+                    gr.Plot(value=lang_plot)
                 with gr.Row():
-                    gr.Plot(value=plot_wer_vs_cer(benchmark_data))
-
-    return cast(gr.Blocks, tab)
+                    gr.Plot(value=scatter_plot)

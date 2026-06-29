@@ -24,7 +24,10 @@ class SharedASRConfig(BaseModel):
     tdt_weight: float = Field(1.0, description="Loss weight for transducer branch.")
 
     aux_interval: int = Field(0, description="Interval for auxiliary CTC layers.")
-    aux_layer: int | None = Field(8, description="Target layer index for auxiliary supervision.")
+    aux_layer: int | None = Field(None, description="Target layer index for auxiliary supervision.")
+
+    use_tdt: bool = Field(True, description="Use TDT duration prediction when the TDT head is active.")
+    joint_fused_batch_size: int | None = Field(4, description="Chunk size for memory-safe joint eval.")
 
     attn_decoder: AttentionDecoderConfig = Field(default_factory=AttentionDecoderConfig)
     tdt_decoder: TDTDecoderConfig = Field(default_factory=TDTDecoderConfig)

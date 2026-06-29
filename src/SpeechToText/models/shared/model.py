@@ -46,6 +46,12 @@ class SharedFastConformerASR(nn.Module):
                 aux_interval=cfg.aux_interval,
                 aux_layer=cfg.aux_layer,
             )
+            for layer_index in self.aux_layers:
+                if layer_index >= cfg.encoder.n_layers:
+                    raise ValueError(
+                        f"aux_layer index {layer_index} is out of range for "
+                        f"encoder with n_layers={cfg.encoder.n_layers}"
+                    )
             self.aux_projs = nn.ModuleList(
                 [nn.Linear(cfg.encoder.d_model, self.vocab_size) for _ in self.aux_layers]
             )
@@ -76,6 +82,7 @@ class SharedFastConformerASR(nn.Module):
                 vocab_size=self.vocab_size,
                 enc_d=cfg.encoder.d_model,
                 pred_d=cfg.encoder.d_model,
+                use_tdt=cfg.use_tdt,
             )
 
             self.tdt_decoder = TDTDecoder(tdt_decoder_cfg)
@@ -97,6 +104,32 @@ class SharedFastConformerASR(nn.Module):
             if target_len > 0:
                 dec_in[batch_index, 1 : target_len + 1] = targets[batch_index, :target_len]
         return dec_in
+
+    def build_decoder_sequences(
+        self,
+        targets: torch.Tensor,
+        target_lengths: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build BOS-prefixed teacher-forcing input and EOS targets for attention."""
+        device = targets.device
+        batch_size = int(target_lengths.shape[0])
+        max_len = int(target_lengths.max().item()) if batch_size > 0 else 0
+
+        dec_in = torch.full((batch_size, max_len + 1), self.pad_id, dtype=torch.long, device=device)
+        dec_out = torch.full((batch_size, max_len + 1), self.pad_id, dtype=torch.long, device=device)
+
+        for index in range(batch_size):
+            target_len = int(target_lengths[index].item())
+            if target_len == 0:
+                dec_in[index, 0] = self.bos_id
+                dec_out[index, 0] = self.eos_id
+                continue
+            sequence = targets[index, :target_len]
+            dec_in[index, 0] = self.bos_id
+            dec_in[index, 1 : target_len + 1] = sequence
+            dec_out[index, :target_len] = sequence
+            dec_out[index, target_len] = self.eos_id
+        return dec_in, dec_out
 
     def encode(
         self, feats: torch.Tensor, feat_lengths: torch.Tensor
@@ -172,7 +205,11 @@ class SharedFastConformerASR(nn.Module):
         """Computes transducer branch joint network outputs."""
         dec_in = self._build_tdt_decoder_input(targets, target_lengths, self.blank_id)
         dec_out = self.tdt_decoder(dec_in)
-        joint_out = self.tdt_joint(enc, dec_out)
+        joint_out = self.tdt_joint.forward_chunked(
+            enc,
+            dec_out,
+            fused_batch_size=self.cfg.joint_fused_batch_size,
+        )
         if isinstance(joint_out, tuple):
             token_logits, duration_logits = joint_out
             return token_logits, duration_logits, out_lengths
@@ -197,9 +234,11 @@ class SharedFastConformerASR(nn.Module):
 
         dec_log_probs: torch.Tensor | None = None
         if "attn" in self.cfg.active_heads:
-            attn_targets = decoder_input if decoder_input is not None else targets
-            if attn_targets is not None:
-                dec_log_probs = self.forward_attn(enc, out_lengths, attn_targets)
+            attn_input = decoder_input
+            if attn_input is None and targets is not None and target_lengths is not None:
+                attn_input, _ = self.build_decoder_sequences(targets, target_lengths)
+            if attn_input is not None:
+                dec_log_probs = self.forward_attn(enc, out_lengths, attn_input)
 
         token_logits: torch.Tensor | None = None
         duration_logits: torch.Tensor | None = None

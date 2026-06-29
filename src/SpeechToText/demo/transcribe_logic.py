@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -19,6 +20,7 @@ from SpeechToText.models.common.inference import (
 from SpeechToText.streaming import StreamingConfig, StreamingSession
 
 _MODEL_CACHE: dict[str, tuple[torch.nn.Module, str]] = {}
+_MODEL_CACHE_LOCK = threading.Lock()
 _SPM_PROCESSOR: SentencePieceProcessor | None = None
 _KENLM_DECODER: object | None = None
 
@@ -75,24 +77,25 @@ def get_model(model_name: str) -> tuple[torch.nn.Module, str]:
     if model_name not in MODEL_CHECKPOINTS:
         raise ValueError(f"Unknown model selection: {model_name}")
 
-    if model_name not in _MODEL_CACHE:
-        ckpt_path = MODEL_CHECKPOINTS[model_name]
-        if not Path(ckpt_path).exists():
-            raise FileNotFoundError(f"Checkpoint file does not exist: {ckpt_path}")
+    with _MODEL_CACHE_LOCK:
+        if model_name not in _MODEL_CACHE:
+            ckpt_path = MODEL_CHECKPOINTS[model_name]
+            if not Path(ckpt_path).exists():
+                raise FileNotFoundError(f"Checkpoint file does not exist: {ckpt_path}")
 
-        sp = get_sentencepiece_processor()
-        logger.info("Loading model '{}' from checkpoint '{}'...", model_name, ckpt_path)
+            sp = get_sentencepiece_processor()
+            logger.info("Loading model '{}' from checkpoint '{}'...", model_name, ckpt_path)
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        model, resolved_type = load_lit_module(ckpt_path, sp=sp)
-        model.to(device)
-        model.eval()
+            model, resolved_type = load_lit_module(ckpt_path, sp=sp)
+            model.to(device)
+            model.eval()
 
-        _MODEL_CACHE[model_name] = (model, resolved_type)
-        logger.info("Model '{}' loaded successfully on {}!", model_name, device)
+            _MODEL_CACHE[model_name] = (model, resolved_type)
+            logger.info("Model '{}' loaded successfully on {}!", model_name, device)
 
-    return _MODEL_CACHE[model_name]
+        return _MODEL_CACHE[model_name]
 
 
 def _decode_beam_kenlm(
@@ -140,7 +143,7 @@ def run_offline_transcribe(audio_path: str, model_name: str, decode_mode: str) -
         wav_lens = torch.tensor([wav.shape[0]], dtype=torch.long, device=device)
 
         if decode_mode == "Greedy Attention Decode":
-            if resolved_type != "ctc_attention":
+            if resolved_type not in ("ctc_attention", "shared"):
                 return (
                     "Greedy Attention Decode is only available for CTC+Attention checkpoints. "
                     "Select a hybrid model or choose a CTC decoding mode."
@@ -243,8 +246,9 @@ def _parse_stream_audio(audio: tuple[int, Any] | str) -> torch.Tensor:
     samples = data.to(torch.float32)
     if samples.numel() == 0:
         return samples
-    if samples.abs().max() > 1.0:
-        samples = samples / 32768.0
+    if samples.dim() > 1:
+        samples = samples.mean(dim=-1)
+    samples = _pcm_to_float32(samples)
     return normalize_stream_audio(sample_rate, samples)
 
 
@@ -257,6 +261,9 @@ def run_streaming_step(
     current_state = state or StreamingState()
 
     if audio is None:
+        if current_state.session is not None:
+            transcript = current_state.session.finish_stream_rescore()
+            return transcript, StreamingState()
         return "", StreamingState()
 
     try:
@@ -278,8 +285,11 @@ def run_streaming_step(
 
         assert current_state.session is not None
         current_state.session.append_audio(samples)
-        current_state.session.process_step()
+        current_state.session.drain_pending_steps()
         return current_state.session.get_full_transcript(), current_state
     except Exception as exc:
         logger.exception("Error during streaming transcription")
+        if current_state.session is not None:
+            current_state.session.reset()
+            current_state = StreamingState(model_name=current_state.model_name)
         return f"Error during streaming transcription: {exc}", current_state

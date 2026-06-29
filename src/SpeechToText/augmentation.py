@@ -136,7 +136,7 @@ def _load_bank_from_pt(
     max_rir_len_sec: float | None,
     max_bank_items: int | None = None,
 ) -> tuple[torch.Tensor, ...] | None:
-    raw = torch.load(str(pt_path), map_location="cpu", weights_only=False)
+    raw = torch.load(str(pt_path), map_location="cpu", weights_only=True)
     if isinstance(raw, tuple):
         clips = list(raw)
     elif isinstance(raw, list):
@@ -337,7 +337,16 @@ class AudioAugmentation:
         if float(torch.rand(()).item()) > cfg.phone_prob:
             return x
         original_len = x.numel()
-        y = up(down(x.unsqueeze(0))).squeeze(0)
+        y = down(x.unsqueeze(0)).squeeze(0)
+        if cfg.phone_highpass_hz > 0.0:
+            y = AF.highpass_biquad(y.unsqueeze(0), cfg.phone_down_sr, cfg.phone_highpass_hz).squeeze(
+                0
+            )
+        if cfg.phone_lowpass_hz > 0.0:
+            y = AF.lowpass_biquad(y.unsqueeze(0), cfg.phone_down_sr, cfg.phone_lowpass_hz).squeeze(
+                0
+            )
+        y = up(y.unsqueeze(0)).squeeze(0)
         if y.numel() > original_len:
             y = y[:original_len]
         elif y.numel() < original_len:

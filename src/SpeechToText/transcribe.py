@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 import torchaudio
@@ -8,6 +9,7 @@ import tyro
 from loguru import logger
 from sentencepiece import SentencePieceProcessor
 
+from SpeechToText.dataset import _pcm_to_float32
 from SpeechToText.models.common.inference import ModelType, load_lit_module, transcribe_batch
 
 
@@ -49,13 +51,18 @@ def transcribe_files(cfg: TranscribeConfig, audio_paths: list[str]) -> list[str]
 
     transcripts: list[str] = []
     for path in audio_paths:
-        wav, sr = torchaudio.load(path)
+        audio_file = Path(path)
+        if not audio_file.is_file():
+            raise FileNotFoundError(f"Audio file not found: {path}")
+
+        wav, sr = torchaudio.load(str(audio_file))
         if wav.dim() == 2 and wav.size(0) > 1:
             wav = wav.mean(dim=0, keepdim=True)
         if sr != cfg.sample_rate:
             wav = torchaudio.functional.resample(wav, sr, cfg.sample_rate)
 
-        audio = wav.squeeze(0).unsqueeze(0).to(device)
+        wav = _pcm_to_float32(wav.squeeze(0))
+        audio = wav.unsqueeze(0).to(device)
         audio_lengths = torch.tensor([audio.size(1)], device=device, dtype=torch.long)
         text = transcribe_batch(
             model,

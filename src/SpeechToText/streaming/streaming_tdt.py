@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from SpeechToText.models.common.transducer_modules import resolve_transducer_modules
+
 
 class StreamingTDTDecoder:
     """Stateful streaming greedy Transducer/TDT decoder.
@@ -47,15 +49,7 @@ class StreamingTDTDecoder:
             AttributeError: If transducer modules cannot be resolved.
         """
         net = getattr(self.model, "net", self.model)
-        decoder = getattr(net, "decoder", None) or getattr(net, "tdt_decoder", None)
-        joint = getattr(net, "joint", None) or getattr(net, "tdt_joint", None)
-
-        if decoder is None or joint is None:
-            raise AttributeError(
-                "Model must have transducer 'decoder'/'joint' or 'tdt_decoder'/'tdt_joint' modules."
-            )
-
-        return decoder, joint
+        return resolve_transducer_modules(net)
 
     def _initialize_decoder_state(self, device: torch.device, decoder: nn.Module) -> None:
         """Sets up prediction tensors and moves historical states to active device.

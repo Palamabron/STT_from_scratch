@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import torch
 import torch.nn.functional as F
@@ -12,7 +12,7 @@ from SpeechToText.models.common.decode_ctc import ctc_ids_to_texts_spm
 from SpeechToText.models.common.rnnt import transducer_greedy_decode_one
 from SpeechToText.models.ctc_attention.decode import attention_greedy_decode, joint_beam_search
 
-ModelType = Literal["auto", "ctc", "ctc_attention", "tdt"]
+ModelType = Literal["auto", "ctc", "ctc_attention", "tdt", "shared"]
 
 
 @dataclass(frozen=True)
@@ -30,11 +30,13 @@ def detect_model_type(checkpoint_path: str) -> ModelType:
     state = ckpt.get("state_dict", ckpt)
     keys = state.keys() if hasattr(state, "keys") else []
 
+    if any(key.startswith("net.tdt_joint.") for key in keys):
+        return "shared"
     if any(key.startswith("net.joint.") for key in keys):
         return "tdt"
     if any(
         key.startswith("net.ctc_proj.")
-        or key.startswith("net.attention.")
+        or key.startswith("net.dec_proj.")
         or key.startswith("net.decoder.")
         for key in keys
     ):
@@ -44,7 +46,7 @@ def detect_model_type(checkpoint_path: str) -> ModelType:
 
     raise ValueError(
         f"Could not detect model type from checkpoint: {checkpoint_path}. "
-        "Pass --model_type explicitly (ctc, ctc_attention, or tdt)."
+        "Pass --model_type explicitly (ctc, ctc_attention, tdt, or shared)."
     )
 
 
@@ -86,6 +88,10 @@ def load_lit_module(
         from SpeechToText.models.tdt.lit import LitFastConformerTDT
 
         module = LitFastConformerTDT(config, sp=sp, vocab_size=vocab_size)
+    elif resolved == "shared":
+        from SpeechToText.models.shared.lit import LitSharedFastConformerASR
+
+        module = LitSharedFastConformerASR(config, sp=sp)
     else:
         raise ValueError(f"Unsupported model type: {resolved}")
 
@@ -109,28 +115,41 @@ def forward_ctc_log_probs(
         out = ctc_lit.net(feats, feat_lens)
         return cast(torch.Tensor, out.log_probs), out.out_lengths
 
-    if model_type == "ctc_attention":
+    if model_type in ("ctc_attention", "shared"):
         from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
+        from SpeechToText.models.shared.lit import LitSharedFastConformerASR
 
-        attn_lit = cast(LitFastConformerCTCAttention, module)
+        if model_type == "shared":
+            attn_lit = cast(LitSharedFastConformerASR, module)
+        else:
+            attn_lit = cast(LitFastConformerCTCAttention, module)
         feats, feat_lens = attn_lit.featurizer(audio, audio_lengths)
-        out = attn_lit(feats, feat_lens, decoder_input=None)
+        out = attn_lit.net(feats, feat_lens) if model_type == "shared" else attn_lit(feats, feat_lens, decoder_input=None)
+        if model_type == "shared":
+            shared_out = cast(Any, out)
+            return cast(torch.Tensor, shared_out.ctc_log_probs), shared_out.out_lengths
         return out.ctc_log_probs, out.out_lengths
 
     raise ValueError(f"Model type '{model_type}' does not expose CTC log-probabilities")
 
 
 def ctc_attention_special_tokens(module: torch.nn.Module) -> CtcAttentionSpecialTokens:
-    """Token ids aligned with LitFastConformerCTCAttention (blank=0, SPM ids +1)."""
+    """Token ids aligned with hybrid CTC+attention modules (blank=0, SPM ids +1)."""
     from SpeechToText.models.ctc_attention.lit import LitFastConformerCTCAttention
+    from SpeechToText.models.shared.lit import LitSharedFastConformerASR
 
-    lit = cast(LitFastConformerCTCAttention, module)
+    if isinstance(module, LitSharedFastConformerASR):
+        lit = module
+        max_decode_len = int(lit.net.cfg.attn_decoder.max_len)
+    else:
+        lit = cast(LitFastConformerCTCAttention, module)
+        max_decode_len = int(lit.net.cfg.decoder.max_len)
     return CtcAttentionSpecialTokens(
         blank_id=int(lit.blank_id),
         bos_id=int(lit.bos_id),
         eos_id=int(lit.eos_id),
         pad_id=int(lit.pad_id),
-        max_decode_len=int(lit.net.cfg.decoder.max_len),
+        max_decode_len=max_decode_len,
     )
 
 

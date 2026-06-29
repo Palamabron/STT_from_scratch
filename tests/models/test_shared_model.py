@@ -61,12 +61,13 @@ def test_shared_asr_forward_shapes() -> None:
 
     targets = torch.randint(1, vocab_size, (1, 5))
     target_lengths = torch.tensor([5], dtype=torch.long)
+    dec_in, _ = model.build_decoder_sequences(targets, target_lengths)
 
-    attn_log_probs = model.forward_attn(enc, out_lengths, targets)
-    assert attn_log_probs.shape == (1, 5, vocab_size)
+    attn_log_probs = model.forward_attn(enc, out_lengths, dec_in)
+    assert attn_log_probs.shape == (1, 6, vocab_size)
     assert torch.allclose(
         attn_log_probs.exp().sum(dim=-1),
-        torch.ones((1, 5), dtype=torch.float32),
+        torch.ones((1, 6), dtype=torch.float32),
         atol=1e-4,
     )
 
@@ -113,8 +114,30 @@ def test_shared_asr_forward_entrypoint() -> None:
     feats = torch.randn(1, 80, 80)
     feat_lengths = torch.tensor([80], dtype=torch.long)
     targets = torch.randint(1, 64, (1, 5))
+    target_lengths = torch.tensor([5], dtype=torch.long)
 
-    output = model(feats, feat_lengths, targets=targets)
+    output = model(feats, feat_lengths, targets=targets, target_lengths=target_lengths)
     assert output.ctc_log_probs is not None
     assert output.dec_log_probs is not None
     assert output.out_lengths.item() <= 10
+
+
+def test_shared_asr_tdt_head_enables_duration_logits() -> None:
+    cfg = SharedASRConfig(
+        active_heads=["tdt"],
+        use_tdt=True,
+        encoder=FastConformerEncoderConfig(
+            d_model=64, n_layers=2, n_heads=2, conv_kernel=5, subsampling_factor=8
+        ),
+    )
+    model = SharedFastConformerASR(
+        cfg, vocab_size=64, blank_id=0, pad_id=4, bos_id=2, eos_id=3
+    )
+
+    feats = torch.randn(1, 80, 80)
+    feat_lengths = torch.tensor([80], dtype=torch.long)
+    targets = torch.randint(1, 64, (1, 5))
+    target_lengths = torch.tensor([5], dtype=torch.long)
+
+    output = model(feats, feat_lengths, targets=targets, target_lengths=target_lengths)
+    assert output.duration_logits is not None
