@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -34,7 +35,7 @@ class StreamingSession:
 
         net = getattr(self.model, "net", self.model)
         if _is_transducer_net(net):
-            self.decoder = StreamingTDTDecoder(
+            self.decoder: StreamingCTCDecoder | StreamingTDTDecoder = StreamingTDTDecoder(
                 self.model,
                 blank_id=self.blank_id,
                 max_symbols_per_t=self.config.max_symbols_per_t,
@@ -135,8 +136,12 @@ class StreamingSession:
             device = next(self.model.parameters()).device
             wav = self.full_audio_buffer.unsqueeze(0).to(device)
             wav_lens = torch.tensor([wav.size(1)], dtype=torch.long, device=device)
-            feats, feat_lens = self.model.featurizer(wav, wav_lens)
-            enc, out_lengths, _aux = net.encode(feats, feat_lens)
+            featurizer = getattr(self.model, "featurizer", None)
+            if featurizer is None:
+                raise AttributeError("Model does not have a 'featurizer' module.")
+            feats, feat_lens = featurizer(wav, wav_lens)
+            encoder_net = cast(Any, net)
+            enc, out_lengths, _aux = encoder_net.encode(feats, feat_lens)
 
             tokens = ctc_attention_special_tokens(self.model)
             rescored_text = decode_ctc_attention_attention_greedy(

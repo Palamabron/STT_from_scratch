@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 
@@ -98,16 +100,38 @@ class SharedFastConformerASR(nn.Module):
         """Computes Attention decoder output log probabilities."""
         tgt_len = targets.size(1)
         tgt = self.tok_embed(targets) + self.pos_embed.weight[:tgt_len]
-        
+
         mask = torch.triu(torch.ones(tgt_len, tgt_len, device=enc.device), diagonal=1).bool()
-        memory_mask = (~(torch.arange(enc.size(1), device=enc.device) < out_lengths.unsqueeze(1))).T
+        memory_mask = torch.arange(enc.size(1), device=enc.device).unsqueeze(
+            0
+        ) >= out_lengths.unsqueeze(1)
 
         dec_out = self.decoder(tgt, enc, tgt_mask=mask, memory_key_padding_mask=memory_mask)
-        return self.dec_proj(dec_out)
+        return cast(torch.Tensor, self.dec_proj(dec_out))
 
     def forward_tdt(
-        self, enc: torch.Tensor, out_lengths: torch.Tensor, targets: torch.Tensor, target_lengths: torch.Tensor
+        self,
+        enc: torch.Tensor,
+        out_lengths: torch.Tensor,
+        targets: torch.Tensor,
+        target_lengths: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """Computes transducer branch joint network outputs."""
-        dec_out = self.tdt_decoder(targets, target_lengths)
-        return self.tdt_joint(enc.unsqueeze(2), dec_out.unsqueeze(1), out_lengths)
+        dec_in = torch.cat(
+            [
+                torch.full(
+                    (targets.size(0), 1),
+                    self.blank_id,
+                    dtype=targets.dtype,
+                    device=targets.device,
+                ),
+                targets,
+            ],
+            dim=1,
+        )
+        dec_out = self.tdt_decoder(dec_in)
+        joint_out = self.tdt_joint(enc, dec_out)
+        if isinstance(joint_out, tuple):
+            token_logits, duration_logits = joint_out
+            return token_logits, duration_logits, out_lengths
+        return joint_out, None, out_lengths

@@ -5,7 +5,7 @@ import multiprocessing as mp
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import torch
@@ -116,7 +116,7 @@ def load_audio(path: str, sample_rate: int) -> torch.Tensor:
         wav = wav.mean(dim=0, keepdim=True)
     if sr != sample_rate:
         wav = torchaudio.functional.resample(wav, sr, sample_rate)
-    return _pcm_to_float32(wav.squeeze(0))
+    return cast(torch.Tensor, _pcm_to_float32(wav.squeeze(0)))
 
 
 def build_decoders(

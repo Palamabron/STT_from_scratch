@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 import torch.nn as nn
 from loguru import logger
@@ -116,4 +118,4 @@ class StreamingEncoderState:
 
         self.audio_buffer = self.audio_buffer[self.hop_samples :]
 
-        return new_hop_enc
+        return cast(torch.Tensor, new_hop_enc)

@@ -13,6 +13,7 @@ from loguru import logger
 @dataclass(frozen=True)
 class BenchmarkConfig:
     """Configuration for offline benchmark aggregation."""
+
     eval_dir: Path = Path("results/eval")
     output_dir: Path = Path("results/benchmark")
 
@@ -37,7 +38,7 @@ def load_and_normalize_eval_csv(path: Path, model_name: str) -> pd.DataFrame:
     df["model_id"] = model_name
     lang_map = {"all": "Overall (EN+PL)", "en": "English (EN)", "pl": "Polish (PL)"}
     df["language_name"] = df["language"].map(lang_map).fillna(df["language"])
-    
+
     decode_map = {
         "greedy": "Greedy CTC Decode",
         "beam_kenlm": "Beam Search + KenLM 5-gram",
@@ -67,7 +68,16 @@ def main(cfg: BenchmarkConfig) -> None:
         return
 
     summary_df = pd.concat(all_dfs, ignore_index=True)
-    summary_cols = ["model_id", "language_name", "decode_mode_name", "num_samples", "wer_pct", "cer_pct", "alpha", "beta"]
+    summary_cols = [
+        "model_id",
+        "language_name",
+        "decode_mode_name",
+        "num_samples",
+        "wer_pct",
+        "cer_pct",
+        "alpha",
+        "beta",
+    ]
     summary_df = summary_df[summary_cols].copy()
 
     summary_df = summary_df.sort_values(by="wer_pct").drop_duplicates(  # type: ignore[arg-type]
@@ -79,11 +89,11 @@ def main(cfg: BenchmarkConfig) -> None:
     ).reset_index(drop=True)
 
     summary_df.to_csv(cfg.output_dir / "offline_summary.csv", index=False)
-    
+
     records = summary_df.to_dict(orient="records")
     with open(cfg.output_dir / "offline_summary.json", "w", encoding="utf-8") as f:
         json.dump(records, f, indent=2, ensure_ascii=False)
-    
+
     logger.info(f"Benchmark aggregation complete in: {cfg.output_dir}")
 
 

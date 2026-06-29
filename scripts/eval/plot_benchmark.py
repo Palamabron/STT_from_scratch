@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -37,7 +38,6 @@ def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
     """Grouped bar plot comparing WER across models and decode modes on the Overall split."""
     df = get_dataframe(data)
 
-    
     df_overall = df[df["language_name"] == "Overall (EN+PL)"].copy()
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -53,13 +53,13 @@ def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
         linewidth=0.7,
     )
 
-    
     for p in ax.patches:
-        height = p.get_height()
+        bar = cast(Any, p)
+        height = bar.get_height()
         if height > 0:
             ax.annotate(
                 f"{height:.2f}%",
-                (p.get_x() + p.get_width() / 2.0, height),
+                (bar.get_x() + bar.get_width() / 2.0, height),
                 ha="center",
                 va="bottom",
                 fontsize=9,
@@ -83,7 +83,6 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
     """Plot comparing Polish (PL) vs English (EN) showing language complexity/flexion impact."""
     df = get_dataframe(data)
 
-    
     df_lang = df[
         (df["language_name"].isin(["English (EN)", "Polish (PL)"]))
         & (df["decode_mode_name"] == "Beam Search + KenLM 5-gram")
@@ -91,8 +90,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    
-    colors = {"English (EN)": "
+    colors = {"English (EN)": "#4a7c59", "Polish (PL)": "#b23b3b"}
 
     sns.barplot(
         data=df_lang,
@@ -105,13 +103,13 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
         linewidth=0.7,
     )
 
-    
     for p in ax.patches:
-        height = p.get_height()
+        bar = cast(Any, p)
+        height = bar.get_height()
         if height > 0:
             ax.annotate(
                 f"{height:.2f}%",
-                (p.get_x() + p.get_width() / 2.0, height),
+                (bar.get_x() + bar.get_width() / 2.0, height),
                 ha="center",
                 va="bottom",
                 fontsize=9,
@@ -129,7 +127,6 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
     ax.set_ylim(0, max(df_lang["wer_pct"]) * 1.15)
     ax.legend(title="Target Language", frameon=True, facecolor="white", edgecolor="0.8")
 
-    
     ax.text(
         0.5,
         -0.22,
@@ -138,7 +135,7 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
         ha="center",
         fontsize=9,
         style="italic",
-        bbox=dict(facecolor="
+        bbox=dict(facecolor="#f9f9f9", edgecolor="0.8", boxstyle="round,pad=0.5"),
     )
 
     sns.despine()
@@ -152,7 +149,6 @@ def plot_wer_vs_cer(data: list[dict] | pd.DataFrame) -> plt.Figure:
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    
     sns.scatterplot(
         data=df,
         x="cer_pct",
@@ -165,7 +161,6 @@ def plot_wer_vs_cer(data: list[dict] | pd.DataFrame) -> plt.Figure:
         alpha=0.85,
     )
 
-    
     if not df.empty:
         import numpy as np
 
@@ -200,21 +195,17 @@ def main() -> None:
     with open(summary_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    
     fig_dir = Path("results/figures")
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    
     fig1 = plot_wer_comparison(data)
     fig1.savefig(fig_dir / "wer_comparison.png", dpi=300)
     plt.close(fig1)
 
-    
     fig2 = plot_language_asymmetry(data)
     fig2.savefig(fig_dir / "language_asymmetry.png", dpi=300)
     plt.close(fig2)
 
-    
     fig3 = plot_wer_vs_cer(data)
     fig3.savefig(fig_dir / "wer_vs_cer.png", dpi=300)
     plt.close(fig3)

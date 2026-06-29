@@ -66,14 +66,11 @@ def test_shared_asr_forward_shapes() -> None:
     targets = torch.randint(1, vocab_size, (1, 5))
     target_lengths = torch.tensor([5], dtype=torch.long)
 
-    attn_probs = model.forward_attention(enc, out_lengths, targets, target_lengths)
+    attn_probs = model.forward_attn(enc, out_lengths, targets)
     assert attn_probs.shape == (1, 5, vocab_size)
 
     # 4. TDT Forward
-    targets_concat = torch.randint(1, vocab_size, (5,))
-    token_logits, duration_logits = model.forward_tdt(
-        enc, out_lengths, targets_concat, target_lengths
-    )
+    token_logits, _, _ = model.forward_tdt(enc, out_lengths, targets, target_lengths)
 
     # Joint logits shape: [batch, time, labels, vocab]
     assert token_logits.size(0) == 1

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from importlib import import_module
 from pathlib import Path
+from typing import Any, cast
 
 import gradio as gr
 import matplotlib.pyplot as plt
@@ -9,23 +11,17 @@ import pandas as pd
 import seaborn as sns
 
 try:
-    from scripts.eval.plot_benchmark import (
-        plot_language_asymmetry,
-        plot_wer_comparison,
-        plot_wer_vs_cer,
-        set_academic_style,
-    )
+    _plot_benchmark = import_module("scripts.eval.plot_benchmark")
 except ImportError:
-    import pathlib
     import sys
 
-    sys.path.append(str(pathlib.Path(__file__).parent.parent.parent.parent / "scripts"))
-    from eval.plot_benchmark import (
-        plot_language_asymmetry,
-        plot_wer_comparison,
-        plot_wer_vs_cer,
-        set_academic_style,
-    )
+    sys.path.append(str(Path(__file__).resolve().parents[3] / "scripts"))
+    _plot_benchmark = import_module("eval.plot_benchmark")
+
+plot_language_asymmetry = _plot_benchmark.plot_language_asymmetry
+plot_wer_comparison = _plot_benchmark.plot_wer_comparison
+plot_wer_vs_cer = _plot_benchmark.plot_wer_vs_cer
+set_academic_style = _plot_benchmark.set_academic_style
 
 
 # Path definitions
@@ -34,17 +30,17 @@ BENCHMARK_JSON_PATH = Path("results/benchmark/offline_summary.json")
 BENCHMARK_CSV_PATH = Path("results/benchmark/offline_summary.csv")
 
 
-def load_stats() -> dict | None:
+def load_stats() -> dict[str, Any] | None:
     if STATS_JSON_PATH.exists():
         with open(STATS_JSON_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            return cast(dict[str, Any], json.load(f))
     return None
 
 
-def load_benchmark_data() -> list[dict] | None:
+def load_benchmark_data() -> list[dict[str, Any]] | None:
     if BENCHMARK_JSON_PATH.exists():
         with open(BENCHMARK_JSON_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            return cast(list[dict[str, Any]], json.load(f))
     return None
 
 
@@ -204,7 +200,9 @@ def create_analytics_tab() -> gr.Blocks:
                             )
 
                 # Dynamic updates on Radio click
-                def update_dataset_stats(split):
+                def update_dataset_stats(
+                    split: str,
+                ) -> tuple[str, plt.Figure, plt.Figure, plt.Figure]:
                     return (
                         get_dataset_summary_markdown(stats_cache, split),
                         plot_dataset_languages(stats_cache, split),
@@ -240,4 +238,4 @@ def create_analytics_tab() -> gr.Blocks:
                 with gr.Row():
                     gr.Plot(value=plot_wer_vs_cer(benchmark_data))
 
-    return tab
+    return cast(gr.Blocks, tab)

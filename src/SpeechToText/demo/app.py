@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
+from typing import cast
 
 import gradio as gr
-import numpy as np
-import torch
 import tyro
 from loguru import logger
 
 from SpeechToText.demo.analytics_tab import create_analytics_tab
+
 # Re-export key streaming logic
 from SpeechToText.demo.transcribe_logic import (
     MODEL_CHECKPOINTS,
-    init_streaming_session,
-    normalize_stream_audio,
-    run_offline_transcribe as run_attention_rescoring, # Temporarily aliased
-    run_offline_transcribe as run_streaming_step,      # Placeholder
+    run_offline_transcribe,
+)
+from SpeechToText.demo.transcribe_logic import (
+    run_offline_transcribe as run_streaming_step,  # Placeholder
 )
 
 
@@ -29,9 +28,28 @@ def build_app() -> gr.Blocks:
             # 1. Transcribe Tab (Offline)
             with gr.Tab("📁 File Transcribe"):
                 file_input = gr.Audio(type="filepath", label="Upload Audio")
-                model_dropdown = gr.Dropdown(list(MODEL_CHECKPOINTS.keys()), label="Select Model")
+                model_dropdown = gr.Dropdown(
+                    choices=list(MODEL_CHECKPOINTS.keys()),
+                    value="FastConformer CTC+Attn v9",
+                    label="Select Model",
+                )
+                decode_dropdown = gr.Dropdown(
+                    choices=[
+                        "Greedy CTC Decode",
+                        "Beam Search + KenLM 5-gram",
+                        "Greedy Attention Decode",
+                    ],
+                    value="Greedy CTC Decode",
+                    label="Decoding Algorithm",
+                )
                 transcribe_btn = gr.Button("Transcribe")
                 output_text = gr.Textbox(label="Transcript")
+
+                transcribe_btn.click(
+                    run_offline_transcribe,
+                    inputs=[file_input, model_dropdown, decode_dropdown],
+                    outputs=[output_text],
+                )
 
             # 2. Streaming Tab (Real-Time)
             with gr.Tab("🎙️ Streaming"):
@@ -48,7 +66,7 @@ def build_app() -> gr.Blocks:
             with gr.Tab("📈 Analytics & Benchmarks"):
                 create_analytics_tab()
 
-    return demo
+    return cast(gr.Blocks, demo)
 
 
 def main() -> None:

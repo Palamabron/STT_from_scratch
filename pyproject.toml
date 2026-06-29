@@ -47,6 +47,7 @@ testpaths = ["tests"]
 python_version = "3.11"
 mypy_path = ["src"]
 packages = ["SpeechToText"]
+plugins = ["pydantic.mypy"]
 strict_optional = true
 warn_unused_configs = true
 warn_unused_ignores = true

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 import torchaudio
@@ -113,7 +113,7 @@ def _decode_beam_kenlm(
     log_probs, out_lengths = forward_ctc_log_probs(model, wav, wav_lens, model_type)
     out_len = int(out_lengths[0].item())
     probs = torch.exp(log_probs[0, :out_len]).detach().cpu().to(torch.float32).numpy()
-    return cast(str, decoder.decode(probs, beam_width=BEAM_WIDTH))
+    return cast(str, cast(Any, decoder).decode(probs, beam_width=BEAM_WIDTH))
 
 
 def run_offline_transcribe(audio_path: str, model_name: str, decode_mode: str) -> str:
@@ -139,13 +139,20 @@ def run_offline_transcribe(audio_path: str, model_name: str, decode_mode: str) -
 
         if decode_mode == "Greedy Attention Decode" and resolved_type == "ctc_attention":
             from SpeechToText.models.common.inference import ctc_attention_special_tokens
-            from SpeechToText.models.ctc_attention.decode import attention_greedy_decode
+            from SpeechToText.models.ctc_attention.decode import (
+                CtcAttentionNet,
+                attention_greedy_decode,
+            )
 
-            feats, feat_lens = model.featurizer(wav.unsqueeze(0), wav_lens)
-            enc, out_lengths, _ = model.net.encode(feats, feat_lens)
+            featurizer = getattr(model, "featurizer", None)
+            if featurizer is None:
+                raise AttributeError("Model does not have a 'featurizer' module.")
+            feats, feat_lens = featurizer(wav.unsqueeze(0), wav_lens)
+            encoder_net = cast(Any, getattr(model, "net", model))
+            enc, out_lengths, _ = encoder_net.encode(feats, feat_lens)
             tokens = ctc_attention_special_tokens(model)
             token_ids = attention_greedy_decode(
-                model.net,
+                cast(CtcAttentionNet, encoder_net),
                 enc,
                 out_lengths,
                 bos_id=tokens.bos_id,
