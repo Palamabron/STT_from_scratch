@@ -8,14 +8,12 @@ import tyro
 from loguru import logger
 
 from SpeechToText.demo.analytics_tab import create_analytics_tab
-
-# Re-export key streaming logic
 from SpeechToText.demo.transcribe_logic import (
+    DEFAULT_STREAM_MODEL,
     MODEL_CHECKPOINTS,
+    StreamingState,
     run_offline_transcribe,
-)
-from SpeechToText.demo.transcribe_logic import (
-    run_offline_transcribe as run_streaming_step,  # Placeholder
+    run_streaming_step,
 )
 
 
@@ -53,12 +51,17 @@ def build_app() -> gr.Blocks:
 
             # 2. Streaming Tab (Real-Time)
             with gr.Tab("🎙️ Streaming"):
-                stream_mic = gr.Audio(sources="microphone", streaming=True)
+                stream_model_dropdown = gr.Dropdown(
+                    choices=list(MODEL_CHECKPOINTS.keys()),
+                    value=DEFAULT_STREAM_MODEL,
+                    label="Select Model",
+                )
+                stream_mic = gr.Audio(sources="microphone", streaming=True, type="numpy")
                 stream_output = gr.Textbox(label="Live Transcript")
-                stream_state = gr.State((None, None))
+                stream_state = gr.State(StreamingState())
                 stream_mic.stream(
                     run_streaming_step,
-                    inputs=[stream_mic, stream_state],
+                    inputs=[stream_mic, stream_state, stream_model_dropdown],
                     outputs=[stream_output, stream_state],
                 )
 

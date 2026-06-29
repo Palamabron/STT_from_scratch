@@ -34,11 +34,37 @@ def get_dataframe(data: list[dict] | pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def _ylim_max(series: pd.Series, *, padding: float = 1.15, default: float = 100.0) -> float:
+    if series.empty:
+        return default
+    return float(series.max()) * padding
+
+
+def _language_asymmetry_note(df_lang: pd.DataFrame) -> str:
+    if df_lang.empty:
+        return (
+            "Note: No per-language KenLM beam-search rows were found in the benchmark summary."
+        )
+
+    en_values = df_lang.loc[df_lang["language_name"] == "English (EN)", "wer_pct"]
+    pl_values = df_lang.loc[df_lang["language_name"] == "Polish (PL)", "wer_pct"]
+    if en_values.empty or pl_values.empty:
+        return "Note: Language-specific WER comparison requires both English and Polish rows."
+
+    return (
+        "Note: Polish exhibits higher WER "
+        f"({pl_values.min():.1f}-{pl_values.max():.1f}%) compared to English "
+        f"({en_values.min():.1f}-{en_values.max():.1f}%) in this benchmark split."
+    )
+
+
 def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
     """Grouped bar plot comparing WER across models and decode modes on the Overall split."""
     df = get_dataframe(data)
 
     df_overall = df[df["language_name"] == "Overall (EN+PL)"].copy()
+    if df_overall.empty:
+        raise ValueError('No rows with language_name == "Overall (EN+PL)" in benchmark summary.')
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -71,7 +97,7 @@ def plot_wer_comparison(data: list[dict] | pd.DataFrame) -> plt.Figure:
     ax.set_title("Word Error Rate (WER) Comparison on Overall Split (EN+PL)", pad=15)
     ax.set_xlabel("Acoustic Model / Pipeline Architecture", labelpad=10)
     ax.set_ylabel("WER (%)", labelpad=10)
-    ax.set_ylim(0, max(df_overall["wer_pct"]) * 1.15)
+    ax.set_ylim(0, _ylim_max(df_overall["wer_pct"]))
     ax.legend(title="Decoding Algorithm", frameon=True, facecolor="white", edgecolor="0.8")
 
     sns.despine()
@@ -87,6 +113,10 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
         (df["language_name"].isin(["English (EN)", "Polish (PL)"]))
         & (df["decode_mode_name"] == "Beam Search + KenLM 5-gram")
     ].copy()
+    if df_lang.empty:
+        raise ValueError(
+            'No English/Polish rows with decode_mode_name == "Beam Search + KenLM 5-gram".'
+        )
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
@@ -124,13 +154,13 @@ def plot_language_asymmetry(data: list[dict] | pd.DataFrame) -> plt.Figure:
     )
     ax.set_xlabel("Acoustic Model / Pipeline Architecture", labelpad=10)
     ax.set_ylabel("WER (%)", labelpad=10)
-    ax.set_ylim(0, max(df_lang["wer_pct"]) * 1.15)
+    ax.set_ylim(0, _ylim_max(df_lang["wer_pct"]))
     ax.legend(title="Target Language", frameon=True, facecolor="white", edgecolor="0.8")
 
     ax.text(
         0.5,
         -0.22,
-        "Note: Polish exhibits significantly higher WER (24-27%) compared to English (13-15%)\ndue to rich morphology, grammatical flexion, and a larger vocabulary state space.",
+        _language_asymmetry_note(df_lang),
         transform=ax.transAxes,
         ha="center",
         fontsize=9,
@@ -188,7 +218,8 @@ def main() -> None:
     summary_path = Path("results/benchmark/offline_summary.json")
     if not summary_path.exists():
         print(
-            f"Error: Summary file {summary_path} does not exist. Run scripts/benchmark_offline.py first."
+            f"Error: Summary file {summary_path} does not exist. "
+            "Run scripts/eval/benchmark_offline.py first."
         )
         return
 

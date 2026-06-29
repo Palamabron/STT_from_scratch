@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ KENLM_MODEL_PATH = "lm/kenlm_en_pl_5gram.arpa"
 BEAM_WIDTH = 32
 BEAM_ALPHA = 0.5
 BEAM_BETA = 1.5
+DEFAULT_STREAM_MODEL = "FastConformer CTC+Attn v9"
 
 MODEL_CHECKPOINTS = {
     "FastConformer CTC+Attn v9": "checkpoints/ctc_attn_4090_65m_v9/012-val_wer=0.27.ckpt",
@@ -137,7 +139,13 @@ def run_offline_transcribe(audio_path: str, model_name: str, decode_mode: str) -
         wav = wav.to(device)
         wav_lens = torch.tensor([wav.shape[0]], dtype=torch.long, device=device)
 
-        if decode_mode == "Greedy Attention Decode" and resolved_type == "ctc_attention":
+        if decode_mode == "Greedy Attention Decode":
+            if resolved_type != "ctc_attention":
+                return (
+                    "Greedy Attention Decode is only available for CTC+Attention checkpoints. "
+                    "Select a hybrid model or choose a CTC decoding mode."
+                )
+
             from SpeechToText.models.common.inference import ctc_attention_special_tokens
             from SpeechToText.models.ctc_attention.decode import (
                 CtcAttentionNet,
@@ -213,3 +221,65 @@ def normalize_stream_audio(
             target_sr,
         ).squeeze(0)
     return samples
+
+
+@dataclass
+class StreamingState:
+    session: StreamingSession | None = None
+    model_name: str | None = None
+
+
+def _parse_stream_audio(audio: tuple[int, Any] | str) -> torch.Tensor:
+    if isinstance(audio, str):
+        wav, sample_rate = torchaudio.load(audio)
+        if wav.dim() == 2 and wav.size(0) > 1:
+            wav = wav.mean(dim=0)
+        samples = _pcm_to_float32(wav.squeeze(0))
+        return normalize_stream_audio(sample_rate, samples)
+
+    sample_rate, data = audio
+    if not isinstance(data, torch.Tensor):
+        data = torch.from_numpy(data)
+    samples = data.to(torch.float32)
+    if samples.numel() == 0:
+        return samples
+    if samples.abs().max() > 1.0:
+        samples = samples / 32768.0
+    return normalize_stream_audio(sample_rate, samples)
+
+
+def run_streaming_step(
+    audio: tuple[int, Any] | str | None,
+    state: StreamingState | None,
+    model_name: str,
+) -> tuple[str, StreamingState]:
+    """Process one streaming microphone chunk and return the live transcript."""
+    current_state = state or StreamingState()
+
+    if audio is None:
+        return "", StreamingState()
+
+    try:
+        if not model_name:
+            model_name = DEFAULT_STREAM_MODEL
+
+        if current_state.session is None or current_state.model_name != model_name:
+            current_state = StreamingState(
+                session=init_streaming_session(model_name),
+                model_name=model_name,
+            )
+
+        samples = _parse_stream_audio(audio)
+        if samples.numel() == 0:
+            transcript = (
+                current_state.session.get_full_transcript() if current_state.session else ""
+            )
+            return transcript, current_state
+
+        assert current_state.session is not None
+        current_state.session.append_audio(samples)
+        current_state.session.process_step()
+        return current_state.session.get_full_transcript(), current_state
+    except Exception as exc:
+        logger.exception("Error during streaming transcription")
+        return f"Error during streaming transcription: {exc}", current_state

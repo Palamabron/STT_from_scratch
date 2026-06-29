@@ -81,7 +81,14 @@ def main(cfg: BenchmarkConfig) -> None:
     summary_df = summary_df[summary_cols].copy()
 
     summary_df = summary_df.sort_values(by="wer_pct").drop_duplicates(  # type: ignore[arg-type]
-        subset=["model_id", "language_name", "decode_mode_name"], keep="first"
+        subset=[
+            "model_id",
+            "language_name",
+            "decode_mode_name",
+            "alpha",
+            "beta",
+        ],
+        keep="first",
     )
 
     summary_df = summary_df.sort_values(
