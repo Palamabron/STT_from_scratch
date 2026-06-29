@@ -5,7 +5,7 @@ import os
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import torch
 import torch.multiprocessing as mp
@@ -17,6 +17,8 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from .augmentation import AudioAugmentation, AudioAugmentConfig
 
 CTC_BLANK_ID = 0
+
+LanguageBalance = Literal["none", "equal_utterances", "equal_duration"]
 
 
 @dataclass(slots=True)
@@ -57,6 +59,7 @@ class LoaderConfig:
     multiprocessing_context: str | None = "spawn"
     cache_audio: bool = False
     stratify_by_language: bool = True
+    language_balance: LanguageBalance = "none"
 
 
 @dataclass(slots=True)
@@ -96,6 +99,43 @@ def _parse_duration(value: Any) -> float | None:
 def _shift_token_ids(token_ids: list[int]) -> list[int]:
     """Reserve ``CTC_BLANK_ID`` and map SentencePiece id ``i`` to ``i + 1``."""
     return [token_id + 1 for token_id in token_ids]
+
+
+def passes_manifest_filters(
+    entry: dict[str, Any],
+    *,
+    sp: SentencePieceProcessor,
+    filter_cfg: FilterConfig,
+    feat_cfg: FeatureConfig,
+    text_key: str = "text",
+    split: str = "val",
+) -> bool:
+    """Return True when a manifest row would be kept by ``ManifestDataset``."""
+    duration = _parse_duration(entry.get("duration"))
+    if duration is None or duration > filter_cfg.max_duration:
+        return False
+
+    audio_path = entry.get("audio_filepath") or entry.get("audio_path")
+    if not isinstance(audio_path, str) or not audio_path:
+        return False
+
+    text = (entry.get(text_key) or "").strip()
+    if not text:
+        return False
+
+    token_ids = sp.encode(text, out_type=int)
+    if not token_ids:
+        return False
+
+    target_len = len(_shift_token_ids(token_ids))
+    encoder_len = estimate_encoder_output_length(
+        duration,
+        sample_rate=feat_cfg.sample_rate,
+        hop_length_ms=feat_cfg.hop_length_ms,
+        subsampling_factor=filter_cfg.subsampling_factor,
+        min_speed_factor=filter_cfg.min_speed_factor if split == "train" else 1.0,
+    )
+    return encoder_len >= target_len
 
 
 def estimate_encoder_output_length(
@@ -188,14 +228,15 @@ class ManifestDataset(Dataset[dict[str, Any]]):
 
                 duration = _parse_duration(entry.get("duration"))
                 if duration is None:
-                    if self.config.filter.on_bad_duration == "drop":
-                        dropped_bad_dur += 1
+                    if self.config.filter.on_bad_duration == "raise":
+                        raise ValueError(f"Invalid duration in manifest entry: {entry}")
+                    dropped_bad_dur += 1
                     continue
                 if duration > self.config.filter.max_duration:
                     dropped_too_long += 1
                     continue
 
-                audio_path = entry.get("audio_filepath")
+                audio_path = entry.get("audio_filepath") or entry.get("audio_path")
                 text = (entry.get("text") or "").strip()
                 lang = entry.get("language", "unknown")
                 dataset_name = entry.get("dataset", "unknown")
@@ -357,6 +398,92 @@ def collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
     return collated
 
 
+def _indices_total_duration(indices: list[int], durations: list[float]) -> float:
+    return sum(float(durations[index]) for index in indices)
+
+
+def _oversample_indices_to_target_duration(
+    indices: list[int],
+    target_duration: float,
+    durations: list[float],
+    generator: torch.Generator,
+) -> list[int]:
+    if not indices:
+        return indices
+
+    current_duration = _indices_total_duration(indices, durations)
+    if current_duration >= target_duration:
+        return indices
+
+    order = torch.randperm(len(indices), generator=generator).tolist()
+    shuffled = [indices[position] for position in order]
+
+    extended: list[int] = []
+    pool_position = 0
+    current_duration = 0.0
+    while current_duration < target_duration:
+        index = shuffled[pool_position % len(shuffled)]
+        extended.append(index)
+        current_duration += float(durations[index])
+        pool_position += 1
+    return extended
+
+
+def _oversample_indices_to_target_count(
+    indices: list[int],
+    target_count: int,
+    generator: torch.Generator,
+) -> list[int]:
+    if not indices or len(indices) >= target_count:
+        return indices
+
+    order = torch.randperm(len(indices), generator=generator).tolist()
+    shuffled = [indices[position] for position in order]
+
+    extended: list[int] = []
+    pool_position = 0
+    while len(extended) < target_count:
+        extended.append(shuffled[pool_position % len(shuffled)])
+        pool_position += 1
+    return extended
+
+
+def _apply_language_balance(
+    by_lang: dict[str, list[int]],
+    *,
+    language_balance: LanguageBalance,
+    durations: list[float],
+    generator: torch.Generator,
+) -> dict[str, list[int]]:
+    if language_balance == "none":
+        return by_lang
+
+    if language_balance == "equal_utterances":
+        target_count = max(len(indices) for indices in by_lang.values())
+        return {
+            language: _oversample_indices_to_target_count(indices, target_count, generator)
+            for language, indices in by_lang.items()
+        }
+
+    if language_balance == "equal_duration":
+        lang_durations = {
+            language: _indices_total_duration(indices, durations)
+            for language, indices in by_lang.items()
+        }
+        target_duration = max(lang_durations.values())
+        return {
+            language: _oversample_indices_to_target_duration(
+                indices,
+                target_duration,
+                durations,
+                generator,
+            )
+            for language, indices in by_lang.items()
+        }
+
+    raise ValueError(f"Unknown language_balance: {language_balance!r}")
+
+
 class DurationBatchSampler(Sampler[list[int]]):
     """Bucketed sampler that limits total audio duration per batch."""
 
@@ -371,10 +498,12 @@ class DurationBatchSampler(Sampler[list[int]]):
         min_batch_size: int = 1,
         languages: list[str] | None = None,
         stratify_by_language: bool = True,
+        language_balance: LanguageBalance = "none",
     ) -> None:
         self.durations: Final[list[float]] = durations
         self.languages: Final[list[str] | None] = languages
         self.stratify_by_language: Final[bool] = bool(stratify_by_language)
+        self.language_balance: Final[LanguageBalance] = language_balance
         self.max_batch_duration: Final[float] = float(max_batch_duration)
         self.max_batch_size: Final[int] = int(max_batch_size)
         self.bucket_size: Final[int] = int(bucket_size)
@@ -390,12 +519,41 @@ class DurationBatchSampler(Sampler[list[int]]):
             raise ValueError("bucket_size must be positive")
         if self.min_batch_size <= 0:
             raise ValueError("min_batch_size must be positive")
+        if self.language_balance != "none" and not self.stratify_by_language:
+            raise ValueError("language_balance requires stratify_by_language=true")
 
         self._num_samples: Final[int] = len(durations)
         self._epoch: int = 0
 
     def set_epoch(self, epoch: int) -> None:
         self._epoch = int(epoch)
+
+    def _indices_by_language(self) -> dict[str, list[int]]:
+        if self.languages is None:
+            raise RuntimeError("languages are required for stratified sampling")
+        by_lang: dict[str, list[int]] = {}
+        for index in range(self._num_samples):
+            language = self.languages[index]
+            by_lang.setdefault(language, []).append(index)
+        return by_lang
+
+    def _stratified_lang_indices(self, generator: torch.Generator) -> dict[str, list[int]]:
+        by_lang = self._indices_by_language()
+        return _apply_language_balance(
+            by_lang,
+            language_balance=self.language_balance,
+            durations=self.durations,
+            generator=generator,
+        )
+
+    def _batches_from_stratified_indices(self, generator: torch.Generator) -> list[list[int]]:
+        by_lang = self._stratified_lang_indices(generator)
+        batches: list[list[int]] = []
+        for lang_indices in by_lang.values():
+            lang_order = torch.randperm(len(lang_indices), generator=generator).tolist()
+            shuffled = [lang_indices[position] for position in lang_order]
+            batches.extend(list(self._yield_batches(shuffled)))
+        return batches
 
     def _yield_batches(self, indices: list[int]) -> Iterator[list[int]]:
         for start in range(0, len(indices), self.bucket_size):
@@ -431,16 +589,7 @@ class DurationBatchSampler(Sampler[list[int]]):
         generator.manual_seed(self.seed + self._epoch if self.shuffle else self.seed)
 
         if self.stratify_by_language and self.languages is not None:
-            by_lang: dict[str, list[int]] = {}
-            for index in range(self._num_samples):
-                language = self.languages[index]
-                by_lang.setdefault(language, []).append(index)
-
-            batches: list[list[int]] = []
-            for lang_indices in by_lang.values():
-                lang_order = torch.randperm(len(lang_indices), generator=generator).tolist()
-                shuffled = [lang_indices[i] for i in lang_order]
-                batches.extend(list(self._yield_batches(shuffled)))
+            batches = self._batches_from_stratified_indices(generator)
 
             if self.shuffle:
                 batch_order = torch.randperm(len(batches), generator=generator).tolist()
@@ -457,17 +606,17 @@ class DurationBatchSampler(Sampler[list[int]]):
         return sum(1 for _ in self._yield_batches(indices))
 
     def __len__(self) -> int:
+        if self._num_samples == 0:
+            return 0
+
         if self.stratify_by_language and self.languages is not None:
-            by_lang: dict[str, list[int]] = {}
-            for index in range(self._num_samples):
-                language = self.languages[index]
-                by_lang.setdefault(language, []).append(index)
-            return max(
-                1, sum(self._count_batches(lang_indices) for lang_indices in by_lang.values())
-            )
+            generator = torch.Generator()
+            generator.manual_seed(self.seed + self._epoch if self.shuffle else self.seed)
+            by_lang = self._stratified_lang_indices(generator)
+            return sum(self._count_batches(lang_indices) for lang_indices in by_lang.values())
 
         indices = list(range(self._num_samples))
-        return max(1, self._count_batches(indices))
+        return self._count_batches(indices)
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -519,7 +668,7 @@ def create_dataloaders(
         loader_kwargs["worker_init_fn"] = _worker_init_fn
 
     mp_ctx = data_config.loader.multiprocessing_context
-    if mp_ctx:
+    if mp_ctx and data_config.loader.num_workers > 0:
         loader_kwargs["multiprocessing_context"] = mp_ctx
 
     train_max_duration = data_config.loader.train_max_batch_duration
@@ -534,6 +683,7 @@ def create_dataloaders(
             min_batch_size=1,
             languages=train_ds.langs,
             stratify_by_language=bool(data_config.loader.stratify_by_language),
+            language_balance=data_config.loader.language_balance,
         )
         train_loader = DataLoader(
             train_ds,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 import lightning.pytorch as pl
@@ -29,6 +30,19 @@ from SpeechToText.models.common.validation_logging import (
 from SpeechToText.models.ctc_attention.model import FastConformerCTCAttention
 from SpeechToText.models.ctc_attention.steps import compute_ctc_attn_losses
 from SpeechToText.models.typing import CTCAttnOutput, TrainBatch, ValBatch
+
+
+@dataclass(frozen=True)
+class TrainingStage:
+    """Effective training behaviour for the current epoch."""
+
+    effective_ctc_weight: float
+    effective_aux_ctc_weight: float
+    include_attn: bool
+    freeze_encoder: bool
+    freeze_ctc_heads: bool
+    freeze_decoder: bool
+    name: str
 
 
 class LitFastConformerCTCAttention(pl.LightningModule):
@@ -85,9 +99,91 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         self._val_texts_pred: list[str] = []
         self._val_texts_ref: list[str] = []
         self._val_langs: list[str] = []
+        self._training_stage: TrainingStage | None = None
 
     def on_fit_start(self) -> None:
         self.featurizer = self.featurizer.to(self.device)
+
+    def _encoder_modules(self) -> list[nn.Module]:
+        return [self.net.encoder]
+
+    def _ctc_head_modules(self) -> list[nn.Module]:
+        return [self.net.ctc_proj, self.net.aux_projs]
+
+    def _decoder_modules(self) -> list[nn.Module]:
+        return [self.net.tok_embed, self.net.pos_embed, self.net.decoder, self.net.dec_proj]
+
+    @staticmethod
+    def _set_trainable(modules: list[nn.Module], trainable: bool) -> None:
+        for module in modules:
+            for parameter in module.parameters():
+                parameter.requires_grad = trainable
+
+    @staticmethod
+    def _set_module_mode(modules: list[nn.Module], train: bool) -> None:
+        for module in modules:
+            if train:
+                module.train()
+            else:
+                module.eval()
+
+    def _training_stage_for_epoch(self, epoch: int) -> TrainingStage:
+        cfg = self.config
+        if cfg.ctc_calibration_epochs > 0 and epoch < cfg.ctc_calibration_epochs:
+            return TrainingStage(
+                effective_ctc_weight=1.0,
+                effective_aux_ctc_weight=float(cfg.aux_ctc_weight),
+                include_attn=False,
+                freeze_encoder=True,
+                freeze_ctc_heads=False,
+                freeze_decoder=True,
+                name="ctc_calibration",
+            )
+        if epoch < cfg.decoder_warmup_epochs:
+            return TrainingStage(
+                effective_ctc_weight=0.0,
+                effective_aux_ctc_weight=0.0,
+                include_attn=True,
+                freeze_encoder=True,
+                freeze_ctc_heads=True,
+                freeze_decoder=False,
+                name="decoder_warmup",
+            )
+
+        freeze_encoder = epoch < cfg.freeze_encoder_epochs
+        freeze_decoder = (
+            cfg.freeze_decoder_after_epoch is not None and epoch >= cfg.freeze_decoder_after_epoch
+        )
+        return TrainingStage(
+            effective_ctc_weight=float(cfg.ctc_weight),
+            effective_aux_ctc_weight=float(cfg.aux_ctc_weight),
+            include_attn=not freeze_decoder,
+            freeze_encoder=freeze_encoder,
+            freeze_ctc_heads=freeze_encoder,
+            freeze_decoder=freeze_decoder,
+            name="joint",
+        )
+
+    def _apply_training_stage(self, stage: TrainingStage) -> None:
+        self._set_trainable(self._encoder_modules(), not stage.freeze_encoder)
+        self._set_trainable(self._ctc_head_modules(), not stage.freeze_ctc_heads)
+        self._set_trainable(self._decoder_modules(), not stage.freeze_decoder)
+        self._set_module_mode(self._encoder_modules(), not stage.freeze_encoder)
+        self._set_module_mode(self._ctc_head_modules(), not stage.freeze_ctc_heads)
+        self._set_module_mode(self._decoder_modules(), not stage.freeze_decoder)
+
+    def on_train_epoch_start(self) -> None:
+        stage = self._training_stage_for_epoch(int(self.current_epoch))
+        self._training_stage = stage
+        self._apply_training_stage(stage)
+        logger.info(
+            "Epoch {} training stage={} ctc_weight={} aux_ctc_weight={} include_attn={}",
+            self.current_epoch,
+            stage.name,
+            stage.effective_ctc_weight,
+            stage.effective_aux_ctc_weight,
+            stage.include_attn,
+        )
 
     def _encode_batch(
         self,
@@ -150,6 +246,7 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         )
 
     def training_step(self, batch: TrainBatch, batch_idx: int) -> torch.Tensor | None:
+        stage = self._training_stage or self._training_stage_for_epoch(int(self.current_epoch))
         audio = batch["audio"]
         audio_lengths = batch["audio_length"]
         targets = batch["targets"]
@@ -159,9 +256,13 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             clean_pass = clean_pass.to(self.device)
 
         feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
-        dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
+        dec_in: torch.Tensor | None = None
+        dec_out: torch.Tensor | None = None
+        if stage.include_attn:
+            dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
         out = self.forward(feats, feat_lens, decoder_input=dec_in)
-        assert out.dec_log_probs is not None
+        if stage.include_attn:
+            assert out.dec_log_probs is not None
 
         filtered = filter_batch_by_encoder_length(batch, out.out_lengths, target_lengths)
         if filtered is None:
@@ -177,11 +278,12 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             if clean_pass is not None:
                 clean_pass = clean_pass.to(self.device)
             feats, feat_lens = self._encode_batch(audio, audio_lengths, clean_pass=clean_pass)
-            dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
+            if stage.include_attn:
+                dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
             out = self.forward(feats, feat_lens, decoder_input=dec_in)
-            assert out.dec_log_probs is not None
+            if stage.include_attn:
+                assert out.dec_log_probs is not None
 
-        assert out.dec_log_probs is not None
         losses = compute_ctc_attn_losses(
             ctc_log_probs=out.ctc_log_probs,
             out_lengths=out.out_lengths,
@@ -192,10 +294,11 @@ class LitFastConformerCTCAttention(pl.LightningModule):
             dec_out=dec_out,
             blank_id=self.blank_id,
             ctc_label_smoothing=self.config.ctc_label_smoothing,
-            aux_ctc_weight=self.config.aux_ctc_weight,
-            ctc_weight=self.config.ctc_weight,
+            aux_ctc_weight=stage.effective_aux_ctc_weight,
+            ctc_weight=stage.effective_ctc_weight,
             autocast_device_type="cuda" if out.ctc_log_probs.is_cuda else "cpu",
             attn_loss_fn=self.attn_loss,
+            include_attn=stage.include_attn,
         )
 
         self.log_dict(
@@ -217,20 +320,78 @@ class LitFastConformerCTCAttention(pl.LightningModule):
         targets = batch["targets"]
         target_lengths = batch["target_length"]
 
+        stage = self._training_stage or self._training_stage_for_epoch(int(self.current_epoch))
+
         feats, feat_lens = self._encode_batch(audio, audio_lengths)
-        out = self.forward(feats, feat_lens, decoder_input=None)
+        dec_in: torch.Tensor | None = None
+        dec_out: torch.Tensor | None = None
+        if stage.include_attn:
+            dec_in, dec_out = self.build_decoder_sequences(targets, target_lengths)
+        out = self.forward(feats, feat_lens, decoder_input=dec_in)
+        if stage.include_attn:
+            assert out.dec_log_probs is not None
 
-        loss = self.ctc_loss(
-            out.ctc_log_probs.float().transpose(0, 1),
-            targets,
-            out.out_lengths,
-            target_lengths,
+        losses = compute_ctc_attn_losses(
+            ctc_log_probs=out.ctc_log_probs,
+            out_lengths=out.out_lengths,
+            aux_log_probs=out.aux_log_probs,
+            targets=targets,
+            target_lengths=target_lengths,
+            dec_log_probs=out.dec_log_probs,
+            dec_out=dec_out,
+            blank_id=self.blank_id,
+            ctc_label_smoothing=self.config.ctc_label_smoothing,
+            aux_ctc_weight=stage.effective_aux_ctc_weight,
+            ctc_weight=stage.effective_ctc_weight,
+            autocast_device_type="cuda" if out.ctc_log_probs.is_cuda else "cpu",
+            attn_loss_fn=self.attn_loss,
+            include_attn=stage.include_attn,
         )
-        self.log("val/loss", loss, prog_bar=True, on_epoch=True, batch_size=audio.size(0))
 
-        decoded = greedy_ctc_decode(out.ctc_log_probs, out.out_lengths, blank_id=self.blank_id)
-        self._val_examples.accumulate_blank_stats(out.ctc_log_probs, out.out_lengths, self.blank_id)
-        pred_texts = ctc_ids_to_texts_spm(self.sp, decoded)
+        self.log_dict(
+            {
+                "val/loss": losses.total,
+                "val/loss_ctc": losses.ctc_main,
+                "val/loss_attn": losses.attn,
+            },
+            prog_bar=True,
+            on_epoch=True,
+            batch_size=audio.size(0),
+        )
+
+        out_infer = self.forward(feats, feat_lens, decoder_input=None)
+
+        val_mode = getattr(self.config, "val_decode_mode", "ctc_greedy")
+        if stage.name == "decoder_warmup":
+            val_mode = "attention_greedy"
+        if val_mode == "attention_greedy":
+            from SpeechToText.models.common.inference import (
+                ctc_attention_special_tokens,
+                decode_ctc_attention_attention_greedy,
+            )
+
+            enc, out_lengths, _aux = self.net.encode(feats, feat_lens)
+            tokens = ctc_attention_special_tokens(self)
+            pred_texts = [
+                decode_ctc_attention_attention_greedy(
+                    self,
+                    enc,
+                    out_lengths,
+                    sample_index=index,
+                    sp=self.sp,
+                    tokens=tokens,
+                )
+                for index in range(audio.size(0))
+            ]
+        else:
+            decoded = greedy_ctc_decode(
+                out_infer.ctc_log_probs, out_infer.out_lengths, blank_id=self.blank_id
+            )
+            pred_texts = ctc_ids_to_texts_spm(self.sp, decoded)
+
+        self._val_examples.accumulate_blank_stats(
+            out_infer.ctc_log_probs, out_infer.out_lengths, self.blank_id
+        )
 
         texts_ref = batch["text"]
         langs = batch.get("language", ["unknown"] * len(pred_texts))

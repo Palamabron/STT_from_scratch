@@ -24,7 +24,7 @@ source .venv/bin/activate
 make test                  # optional
 make smoke-train           # optional GPU sanity check
 
-make train-ctc-4090        # main baseline
+make train-ctc             # main baseline (aliased, optimized for 24GB GPUs)
 
 export SPM=models/spm_unigram_4k_trainval.model
 uv run python -m SpeechToText.evaluate \
@@ -177,19 +177,17 @@ export VAL=data/manifests/final/val_final.jsonl
 export SPM=models/spm_unigram_4k_trainval.model
 ```
 
-#### Recommended order (RTX 4090)
+#### Recommended order
 
 | Step | Command | Notes |
 |------|---------|-------|
-| 1 | `make train-ctc-4090` | ~40-50 epochs min; watch `val/wer/overall` |
+| 1 | `make train-ctc` | ~40-50 epochs min; watch `val/wer/overall` |
 | 2 | `make init-rnnt-from-ctc` | Copy CTC encoder weights |
 | 3 | Train RNN-T with `--ckpt_path` (see below) | Warm-started transducer |
-| 4 | `make train-tdt-4090` | After stable RNN-T baseline |
-| 5 | `make train-ctc-attn-4090` | Optional |
+| 4 | `make train-tdt` | After stable RNN-T baseline |
+| 5 | `make train-ctc-attn` | Optional |
 
-OOM fallbacks: `train-ctc-4090-oom` (batch duration 180), `train-ctc-4090-sm` (~55M params), `train-rnnt-4090-oom`, `train-ctc-attn-4090-oom`.
-
-Hyperparameter reference (RTX 4090): `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
+Hyperparameter reference: `configs/train/ctc_4090.env`, `ctc_4090_65m.env`, `ctc_4090_oom.env`, `ctc_attn_4090.env`, `transducer_4090.env`. Default batch duration is **1200 s** of audio per step (`BATCH_DURATION` in Makefile).
 
 #### Warm-start RNN-T from CTC
 
@@ -210,7 +208,7 @@ uv run python -m SpeechToText.models.tdt.train \
   --wandb_run_name rnnt-4090-from-ctc
 ```
 
-Random-init RNN-T (no CTC warm-start): `make train-rnnt-4090`.
+Random-init RNN-T (no CTC warm-start): `make train-rnnt`.
 
 #### Resume
 
@@ -291,6 +289,21 @@ RNN-T/TDT: add `--model_type tdt --val_max_symbols_per_t 10`.
 
 ---
 
+### Step 8 — Interactive Gradio Web Demo
+
+You can run the interactive multi-tab Gradio web application for real-time file transcription, live microphone streaming (CTC/TDT), and advanced analytics & benchmarks visualization.
+
+```bash
+make demo
+```
+
+The app will launch on `http://127.0.0.1:7860` by default. It features:
+* **Audio File Transcription:** Upload any `.wav`/`.mp3` audio and transcribe it using your trained model checkpoints.
+* **Microphone Streaming:** Record directly from your microphone with low-latency frame-by-frame streaming updates.
+* **Analytics Tab:** Visualizations of WER vs CER, model parameter trade-offs, language asymmetry, and validation history across your experimental runs.
+
+---
+
 ## Project layout
 
 ```
@@ -303,6 +316,7 @@ checkpoints/               Training outputs (gitignored)
 results/eval/              Evaluation CSVs
 scripts/                   Data prep, tokenizer, checkpoint tools
 src/SpeechToText/          Library code
+src/SpeechToText/demo/     Gradio Web Application & Analytics dashboard
 tests/                     Unit tests
 ```
 
@@ -317,17 +331,20 @@ tests/                     Unit tests
 | `make train-tokenizer` | Rebuild 4k SPM |
 | `make train-tokenizer-8k` | Balanced EN/PL 8k SPM |
 | `make tokenizer-coverage` | Polish tail-char / unk audit |
-| `make train-ctc-4090` | CTC baseline |
-| `make train-rnnt-4090` | RNN-T |
-| `make train-ctc-attn-4090` | CTC+Attention |
-| `make train-tdt-4090` | True TDT |
+| `make train-ctc` | CTC baseline |
+| `make train-rnnt` | RNN-T baseline |
+| `make train-ctc-attn` | CTC + Attention |
+| `make train-tdt` | True TDT |
 | `make init-rnnt-from-ctc` | CTC encoder -> RNN-T |
 | `make average-checkpoints` | SWA-style average (last N epochs) |
 | `make ablate-subsample-4x` | Subsampling ablation |
 | `make ablate-kenlm-ctc` | Hybrid vs E2E ablation |
 | `make ablate-rnnt-clamp` | clamp sanity |
 | `make smoke-train` | GPU overfit sanity |
-| `make test` / `make fmt` / `make types` | CI checks |
+| `make demo` | Start interactive Gradio web demo and dashboard |
+| `make test` / `make fmt` / `make types` | CI checks (Pytest, Ruff formatting, MyPy types) |
+
+*Note: All general training targets have hardware-specific counterparts with the `-4090` suffix (e.g. `make train-ctc-4090`) which contain optimized VRAM duration boundaries.*
 
 ---
 
@@ -341,3 +358,4 @@ tests/                     Unit tests
 | W&B errors | `--no-use-wandb` |
 | KenLM eval fails | Build `lm/pl_5gram.arpa` separately |
 | Tokenizer mismatch | Same `--data.tokenizer_model` for train and eval |
+| Missing cache HDD | The data prefetching pipeline automatically falls back to your home directory (~/.cache/huggingface) if `/media/kuba/HDD18TB` is not accessible |

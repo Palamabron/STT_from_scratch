@@ -33,6 +33,11 @@ dev = [
     "pytest>=8.0.0",
     "pre-commit>=4.0.0",
 ]
+demo = [
+    "gradio>=4.0",
+    "matplotlib",
+    "seaborn",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "scripts"]
@@ -42,6 +47,7 @@ testpaths = ["tests"]
 python_version = "3.11"
 mypy_path = ["src"]
 packages = ["SpeechToText"]
+plugins = ["pydantic.mypy"]
 strict_optional = true
 warn_unused_configs = true
 warn_unused_ignores = true

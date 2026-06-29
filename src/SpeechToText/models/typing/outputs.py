@@ -31,3 +31,14 @@ class TDTOutput(NamedTuple):
     token_logits: torch.Tensor | None = None
     duration_logits: torch.Tensor | None = None
     duration_log_probs: torch.Tensor | None = None
+
+
+class SharedASROutput(NamedTuple):
+    """Outputs from the shared multi-head FastConformer ASR model."""
+
+    out_lengths: torch.Tensor
+    ctc_log_probs: torch.Tensor | None = None
+    aux_log_probs: torch.Tensor | None = None
+    dec_log_probs: torch.Tensor | None = None
+    token_logits: torch.Tensor | None = None
+    duration_logits: torch.Tensor | None = None

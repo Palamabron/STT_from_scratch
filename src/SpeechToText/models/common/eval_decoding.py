@@ -10,7 +10,7 @@ from sentencepiece import SentencePieceProcessor
 
 from SpeechToText.models.common import greedy_ctc_decode
 
-MetricKey: TypeAlias = tuple[str, int | None, float | None, float | None, str]
+MetricKey: TypeAlias = tuple[str, int | None, float | None, float | None, float | None, str]
 MetricState: TypeAlias = dict[str, float]
 
 
@@ -83,7 +83,7 @@ def decode_batch_with_greedy(
             continue
 
         for lang_key in ("all", lang):
-            key = ("greedy", None, None, None, lang_key)
+            key = ("greedy", None, None, None, None, lang_key)
             state = metrics.setdefault(
                 key, {"wer_num": 0.0, "wer_den": 0.0, "cer_num": 0.0, "cer_den": 0.0, "count": 0.0}
             )
@@ -129,7 +129,7 @@ def decode_batch_with_beam(
     decoder_ctc: Any | None,
     decoders_kenlm: dict[tuple[float, float], Any],
     pool: Any | None,
-    metrics: dict[tuple[str, int | None, float | None, float | None, str], dict[str, float]],
+    metrics: dict[MetricKey, MetricState],
 ) -> None:
     """Run beam and beam+KenLM decoding and update metrics."""
     if not probs_per_example:
@@ -144,13 +144,13 @@ def decode_batch_with_beam(
         for beam_width in beam_widths:
             hyps = _decode_batch(decoder_ctc, probs_per_example, beam_width)
 
-            for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
+            for hyp, ref, lang in zip(hyps, refs, langs, strict=True):
                 wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
                 if werden == 0 and cerden == 0:
                     continue
 
                 for lang_key in ("all", lang):
-                    key: MetricKey = ("beam", beam_width, None, None, lang_key)
+                    key: MetricKey = ("beam", beam_width, None, None, None, lang_key)
                     state = metrics.setdefault(
                         key,
                         {
@@ -177,13 +177,13 @@ def decode_batch_with_beam(
                 for beam_width in beam_widths:
                     hyps = _decode_batch(decoder, probs_per_example, beam_width)
 
-                    for hyp, ref, lang in zip(hyps, refs, langs, strict=False):
+                    for hyp, ref, lang in zip(hyps, refs, langs, strict=True):
                         wernum, werden, cernum, cerden = compute_wer_cer(ref, hyp)
                         if werden == 0 and cerden == 0:
                             continue
 
                         for lang_key in ("all", lang):
-                            key = ("beam_kenlm", beam_width, alpha, beta, lang_key)
+                            key = ("beam_kenlm", beam_width, alpha, beta, None, lang_key)
                             state = metrics.setdefault(
                                 key,
                                 {

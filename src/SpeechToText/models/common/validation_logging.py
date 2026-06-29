@@ -114,7 +114,7 @@ def _resolve_wandb_logger(logger: object | None) -> WandbLogger | None:
         return None
     if isinstance(logger, WandbLogger):
         return logger
-    if isinstance(logger, (list, tuple)):
+    if isinstance(logger, list | tuple):
         for item in logger:
             resolved = _resolve_wandb_logger(item)
             if resolved is not None:

@@ -2,6 +2,8 @@
 data/
 !data/debug/
 !data/debug/**
+!scripts/data/
+!scripts/data/**
 checkpoints/
 wandb/
 media/
@@ -10,6 +12,10 @@ lm/
 results/**/*
 !results/eval/
 !results/eval/.gitkeep
+
+# --- Training Configs & Local Utils ---
+configs/train/
+scripts/utils/
 
 # Build / packaging
 *.egg-info/
@@ -22,7 +28,7 @@ env/
 # --- Python & Jupyter Cache ---
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
+*.ipynb_checkpoints/
 
 # --- IDE & System ---
 .vscode/
